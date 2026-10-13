@@ -1,0 +1,238 @@
+{
+  "review_date_local": "2026-10-12",
+  "timezone": "America/Denver",
+  "method": "GitHub search/API metadata plus indicated README/endpoint review",
+  "repositories": [
+    {
+      "repo": "yhirose/cpp-httplib",
+      "license": "MIT",
+      "stars": 16910,
+      "default_branch": "master",
+      "reviewed_commit": "941745c33d8af20d37de7ade8b768c3c9f0a3c79"
+    },
+    {
+      "repo": "nlohmann/json",
+      "license": "MIT",
+      "stars": 50755,
+      "default_branch": "develop",
+      "reviewed_commit": "40a62947d3e23f46cbc863afdcc6f5c933d5ed10"
+    },
+    {
+      "repo": "swar/nba_api",
+      "license": "MIT",
+      "stars": 3801,
+      "default_branch": "master",
+      "reviewed_commit": "52c0fb0b81c4b785d6cebeb9988799e5d796dfd7"
+    },
+    {
+      "repo": "bttmly/nba",
+      "license": "MIT",
+      "stars": 734,
+      "default_branch": "master",
+      "reviewed_commit": "85a87d7d82b03ea38200a06e5044de0d140869fc"
+    },
+    {
+      "repo": "jaebradley/basketball_reference_web_scraper",
+      "license": "MIT",
+      "stars": 560,
+      "default_branch": "v4",
+      "reviewed_commit": "1ec892df21e7f206ab253ed0a3ade3fc4be2e16e"
+    },
+    {
+      "repo": "parlayparlor/nba-prop-prediction-model",
+      "license": "MIT",
+      "stars": 32,
+      "default_branch": "main",
+      "reviewed_commit": "0b7fea76d525af5918aaea7cafb0116d5cfcc5b5"
+    },
+    {
+      "repo": "flancast90/sportsbookreview-scraper",
+      "license": "MIT",
+      "stars": 54,
+      "default_branch": "main",
+      "reviewed_commit": "1a820e50c6fbd0276cde073c22bfffae78930868"
+    },
+    {
+      "repo": "freshened/nba-prop-analytics",
+      "license": "MIT",
+      "stars": 3,
+      "default_branch": "main",
+      "reviewed_commit": "82004e4de5bab9d07c324f1866e9e8ccf7d0e105"
+    },
+    {
+      "repo": "RaudyG/nba-game-prediction",
+      "license": "MIT",
+      "stars": 0,
+      "default_branch": "main",
+      "reviewed_commit": "e58e280823d1c278150e86b91702dfb40a5aa420"
+    },
+    {
+      "repo": "Pirkn/NBA-Game-Outcome-Prediction",
+      "license": "MIT",
+      "stars": 12,
+      "default_branch": "main",
+      "reviewed_commit": "b9fcd628992acbb725edc8cc3b53e61790838adc"
+    },
+    {
+      "repo": "muyangye/NBA_Prediction",
+      "license": "MIT",
+      "stars": 4,
+      "default_branch": "main",
+      "reviewed_commit": "eccf1cfd3174e95fb3b1b822b213168f550fc217"
+    },
+    {
+      "repo": "Airkid29/TruthMarket",
+      "license": "MIT",
+      "stars": 1,
+      "default_branch": "main",
+      "reviewed_commit": "58c81106526b89b5b6693018865958a3687c3f03"
+    },
+    {
+      "repo": "cwendt94/espn-api",
+      "license": "MIT",
+      "stars": 984,
+      "default_branch": "master",
+      "reviewed_commit": "c356d1ade54760e50ac57e8f1fe30a64a560f7a0"
+    },
+    {
+      "repo": "cmunch1/nba-prediction",
+      "license": "No license detected",
+      "stars": 311,
+      "default_branch": "main",
+      "reviewed_commit": "386880479ddea1002965115a58dfda65adab3d62"
+    },
+    {
+      "repo": "kyleskom/NBA-Machine-Learning-Sports-Betting",
+      "license": "No license detected",
+      "stars": 1742,
+      "default_branch": "master",
+      "reviewed_commit": "8e36b0b72ecc5082aa8976dff742cdf910b3aa36"
+    },
+    {
+      "repo": "whisdev/NBA-prediction-sports-betting",
+      "license": "No license detected",
+      "stars": 90,
+      "default_branch": "main",
+      "reviewed_commit": "d34af051cde7810127196693a2641e5560ce8226"
+    },
+    {
+      "repo": "nealmick/Sports-Betting-ML-Tools-NBA",
+      "license": "No license detected",
+      "stars": 88,
+      "default_branch": "main",
+      "reviewed_commit": "11fcbce209fb13542baa94afa221f383e25427b2"
+    },
+    {
+      "repo": "luke-lite/NBA-Prediction-Modeling",
+      "license": "No license detected",
+      "stars": 53,
+      "default_branch": "main",
+      "reviewed_commit": "5af5465d15d5ce28e42de766ba29dc9eb0451b40"
+    },
+    {
+      "repo": "lazarobeas/NBAProject",
+      "license": "No license detected",
+      "stars": 10,
+      "default_branch": "main",
+      "reviewed_commit": "980a7090e91241ab6067535d48873cf618407f46"
+    },
+    {
+      "repo": "nihalafs11/StatsPicksNBA",
+      "license": "No license detected",
+      "stars": 7,
+      "default_branch": "main",
+      "reviewed_commit": "160c8425e26ed82afebdeb1042989ae0d99d3c43"
+    },
+    {
+      "repo": "akhilpenumudy/NBA-Player-Prop-Cheat-Sheet-Maker",
+      "license": "No license detected",
+      "stars": 5,
+      "default_branch": "master",
+      "reviewed_commit": "05efb75027315881fed442f6fa5b3de2a017c348"
+    },
+    {
+      "repo": "nlefrancois6/NBA_prediction",
+      "license": "No license detected",
+      "stars": 2,
+      "default_branch": "main",
+      "reviewed_commit": "ea88816b821459f3c82083fb9fb42a09bc63a6f7"
+    },
+    {
+      "repo": "LuuVi2911/NBA-Betting",
+      "license": "No license detected",
+      "stars": 1,
+      "default_branch": "main",
+      "reviewed_commit": "234fa4b01f9cb3379f5ef75157db7c5ef973480a"
+    },
+    {
+      "repo": "seanj2508/SportsBetPredictor",
+      "license": "No license detected",
+      "stars": 0,
+      "default_branch": "main",
+      "reviewed_commit": "c7e91dc30192a57e7360ad2da2c64ca7e1e282f7"
+    },
+    {
+      "repo": "ANickFlower/nba-props-app",
+      "license": "No license detected",
+      "stars": 0,
+      "default_branch": "main",
+      "reviewed_commit": "04b486d941e3785b6f92b93a1efe64974a552970"
+    },
+    {
+      "repo": "gboogy/nba-injury-data-scraper",
+      "license": "No license detected",
+      "stars": 2,
+      "default_branch": "master",
+      "reviewed_commit": "e9ead3e164053a902ad820501dac23dcfe0b8358"
+    },
+    {
+      "repo": "boostorg/math",
+      "license": "BSL-1.0",
+      "stars": 377,
+      "default_branch": "develop",
+      "reviewed_commit": "4e7ca955f52c7d6f4f22c2675149f59a9df2f6fb"
+    },
+    {
+      "repo": "lexbor/lexbor",
+      "license": "Apache-2.0",
+      "stars": 2101,
+      "default_branch": "master",
+      "reviewed_commit": "f4cbbcd91359a0ec9499e3ce7e263de629482d61"
+    },
+    {
+      "repo": "auroradan/PrizePicks-Prop-Finder",
+      "license": "No license detected",
+      "stars": 18,
+      "default_branch": "main",
+      "reviewed_commit": "21506c21e4faa2d2889db74edcff24f5dafa840b"
+    },
+    {
+      "repo": "dsullo1216/nba-predictions",
+      "license": "No license detected",
+      "stars": 0,
+      "default_branch": "master",
+      "reviewed_commit": "e893b104502819e0f2f374aa53f1657edf77af33"
+    },
+    {
+      "repo": "bslaski10/p6pickfinder",
+      "license": "No license detected",
+      "stars": 1,
+      "default_branch": "main",
+      "reviewed_commit": "da72385f554bd16410fab4b0d6a7c04c36ac0683"
+    },
+    {
+      "repo": "apsh0tDev/betseeker",
+      "license": "No license detected",
+      "stars": 1,
+      "default_branch": "master",
+      "reviewed_commit": "3f9c00e2c7b9a68e07aea619d395d2ead7a08ce5"
+    },
+    {
+      "repo": "jbl306/labs-wiki",
+      "license": "MIT",
+      "stars": 1,
+      "default_branch": "main",
+      "reviewed_commit": "11e1bf02cc0f3839ae3530d366d9f94293aa01ce"
+    }
+  ]
+}

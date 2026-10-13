@@ -1,0 +1,13 @@
+/build/
+/.cache/
+/.tools/
+/node_modules/
+/edgecourt-data/
+/release-work/
+/release-test/
+*.tmp
+*.log
+__pycache__/
+
+/releases/*.pdb
+/releases/*.lib

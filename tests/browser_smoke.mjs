@@ -1,0 +1,63 @@
+// Optional browser integration test. The application itself has no Node runtime dependency.
+// npm install --no-save --package-lock=false --prefix .cache/browser playwright-core@1.58.2 @sparticuz/chromium@143.0.4
+// node tests/browser_smoke.mjs http://127.0.0.1:3000
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import path from 'node:path';
+import fs from 'node:fs/promises';
+const modules=path.resolve(process.env.EDGECOURT_BROWSER_MODULES || '.cache/browser/node_modules');
+const require=createRequire(path.join(modules,'package.json'));
+const {chromium:playwright}=require('playwright-core');
+let executablePath=process.env.EDGECOURT_CHROMIUM,args=['--no-sandbox'];
+if(!executablePath){
+  const pkg=require('@sparticuz/chromium');const chromium=pkg.default || pkg;
+  const chromiumDir=path.join(modules,'@sparticuz/chromium');
+  const {inflate}=require(path.join(chromiumDir,'build/cjs/lambdafs.cjs'));
+  const libs=await inflate(path.join(chromiumDir,'bin/al2023.tar.br'));
+  process.env.LD_LIBRARY_PATH=path.join(libs,'lib');process.env.FONTCONFIG_PATH='/tmp/fonts';
+  executablePath=await chromium.executablePath();
+  args=chromium.args.filter(a=>a!=='--disable-web-security');
+}
+const base=process.argv[2] || 'http://127.0.0.1:3000';
+const browser=await playwright.launch({executablePath,args,headless:true});
+const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});
+const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+const waitToast=async()=>page.locator('#toast').waitFor({state:'visible'});
+try{
+  await page.goto(base,{waitUntil:'networkidle'});await page.locator('#loading-overlay').waitFor({state:'hidden'});
+  await page.locator('#refresh-button').click();await waitToast();
+  assert.equal(await page.locator('#market-rows tr').count(),8);
+  await page.locator('[data-category="moneyline"]').click();assert.equal(await page.locator('#market-rows tr').count(),6);
+  await page.locator('[data-category="points"]').click();await page.locator('#search-input').fill('Stephen Curry');assert.equal(await page.locator('#market-rows tr').count(),2);
+  await page.locator('#ev-filter').click();assert.ok(await page.locator('#market-rows tr').count()<=2);
+  await page.locator('#more-filters').click();await page.locator('#clear-filters').click();
+  await page.locator('#market-rows [data-save]').first().click();assert.equal(await page.locator('#watch-count').innerText(),'1');
+  await page.locator('.primary-nav [data-view="watchlist"]').click();assert.equal(await page.locator('#market-rows tr').count(),1);
+  await page.locator('#market-rows [data-save]').first().click();assert.ok(await page.locator('#empty-state').isVisible());
+  await page.locator('.primary-nav [data-view="markets"]').click();
+  await page.locator('[data-game="demo-3"]').click();assert.match(await page.locator('#active-game-filter').innerText(),/MIN @ DEN/);
+  await page.locator('#remove-game-filter').click();
+  await page.locator('[data-time="upcoming"]').click();assert.equal(await page.locator('.game-card').count(),2);await page.locator('[data-time="all"]').click();
+  await page.locator('.primary-nav [data-view="lab"]').click();assert.equal(await page.locator('.catalog-item').count(),35);assert.ok((await page.locator('#lab-view').innerText()).includes('not established an edge'));
+  await page.locator('.primary-nav [data-view="markets"]').click();
+  await page.locator('#import-button').click();await page.locator('#import-game').selectOption('demo-2');await page.locator('#import-market').selectOption('points');await page.locator('#import-team').selectOption('GSW');
+  await page.locator('#import-player').fill('Stephen Curry');await page.locator('#import-line').fill('26.5');await page.locator('[name="americanOdds"]').fill('115');await page.locator('[name="book"]').fill('Browser quote');await page.locator('#manual-submit').click();
+  await page.locator('#import-dialog').waitFor({state:'hidden'});await page.locator('#search-input').fill('Browser quote');assert.equal(await page.locator('#market-rows tr').count(),1);assert.ok((await page.locator('#research-panel').innerText()).includes('Stephen Curry'));
+  const downloadPromise=page.waitForEvent('download');await page.locator('#export-button').click();const download=await downloadPromise;await fs.mkdir('.cache/browser-results',{recursive:true});await download.saveAs('.cache/browser-results/markets.csv');const csv=await fs.readFile('.cache/browser-results/markets.csv','utf8');assert.match(csv,/Browser quote/);assert.match(csv,/modelEVPercent/);
+  await page.locator('#import-button').click();await page.locator('[data-import-tab="file"]').click();await page.locator('#file-format').selectOption('json');
+  await page.locator('#import-content').fill('{not valid json}');await page.locator('#file-submit').click();await page.locator('#file-error').waitFor({state:'visible'});assert.ok(await page.locator('#import-dialog').isVisible());
+  const observedAt=new Date().toISOString().replace(/\.\d{3}Z$/,'Z');
+  const quote={gameId:'demo-2',market:'points',player:'Browser <img src=x onerror="window.xss=1">',team:'GSW',side:'over',line:24.5,americanOdds:110,book:'XSS test <svg/onload="window.xss=1">',observedAt};
+  await page.locator('#import-content').fill(JSON.stringify({quotes:[quote]}));await page.locator('#file-submit').click();await page.locator('#import-dialog').waitFor({state:'hidden'});await page.locator('#search-input').fill('XSS test');assert.equal(await page.locator('#market-rows tr').count(),1);assert.equal(await page.locator('#market-rows img, #market-rows svg[onload]').count(),0);assert.equal(await page.evaluate(()=>window.xss),undefined);
+  await page.locator('#search-input').fill('Browser quote');await page.locator('#settings-button').click();await page.locator('#bankroll-input').fill('1250');await page.locator('#sizing-input').check();await page.locator('#save-settings').click();assert.ok(await page.locator('.sizing-block').isVisible());
+  await page.locator('#refresh-button').click();await waitToast();await page.locator('#clear-filters').click();
+  await page.locator('#next-page').click();assert.match(await page.locator('#page-status').innerText(),/^2 /);await page.locator('#prev-page').click();
+  await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),390);
+  const bounds=await page.evaluate(()=>{const a=document.querySelector('.brand').getBoundingClientRect(),b=document.querySelector('.primary-nav').getBoundingClientRect();return {brandRight:a.right,navLeft:b.left};});assert.ok(bounds.brandRight<=bounds.navLeft+1,'Mobile branding must not overlap navigation');
+  await page.locator('#category-filter').selectOption('rebounds');assert.equal(await page.locator('#board-title').innerText(),'Rebounds (O/U)');await page.locator('#clear-filters').click();
+  await page.screenshot({path:'.cache/browser-results/mobile.png',fullPage:true});
+  await page.setViewportSize({width:1440,height:1000});await page.locator('#settings-button').click();await page.locator('#sizing-input').uncheck();await page.locator('#save-settings').click();await page.locator('#more-filters').click();
+  await page.screenshot({path:'.cache/browser-results/desktop.png',fullPage:true});
+  assert.deepEqual(errors,[]);
+  console.log('PASS browser: category/search/EV filters, watchlist, game/status filters, model lab, manual/file import, validation errors, safe HTML escaping, CSV export, pagination, settings, mobile category access and responsive layout.');
+}finally{await browser.close();}

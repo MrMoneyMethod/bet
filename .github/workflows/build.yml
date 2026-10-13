@@ -1,0 +1,39 @@
+name: Build and test Edgecourt
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Test native core and HTTP integration
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force releases | Out-Null
+          Copy-Item build/Release/Edgecourt.exe releases/Edgecourt.exe -Force
+          python scripts/package_release.py
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: Edgecourt-Windows-x64
+          path: |
+            releases/Edgecourt-Windows-x64.zip
+            releases/SHA256SUMS.txt
