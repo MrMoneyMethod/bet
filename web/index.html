@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="description" content="Edgecourt — a local, transparent NBA market research workspace.">
+  <title>Edgecourt · NBA market research</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Edgecourt home"><span class="brand-mark"><i></i><i></i><i></i></span><span>edgecourt<span class="brand-period">.</span></span></a>
+    <nav class="primary-nav" aria-label="Workspace"><button class="active" data-view="markets">Markets</button><button data-view="watchlist">Watchlist <span id="watch-count" class="nav-count">0</span></button><button data-view="lab">Model lab <span class="beta-label">BETA</span></button></nav>
+    <div class="header-actions"><button id="health-button" class="health-button" title="View data sources"><span class="health-dot"></span><span id="health-label">Demo workspace</span></button><button id="settings-button" class="icon-button" title="Settings" aria-label="Open settings" data-icon="settings"></button><span class="profile-avatar" title="Local workspace">EC</span></div>
+  </header>
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="league-switch"><span class="league-icon" data-icon="basketball"></span><div><strong>NBA</strong><small>Basketball markets</small></div><span class="chevron" data-icon="chevronDown"></span></div>
+      <div class="sidebar-label">EXPLORE MARKETS</div>
+      <nav id="category-nav" aria-label="Market categories"></nav>
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-label">YOUR WORKSPACE</div>
+      <button class="sidebar-link" data-view="watchlist"><span data-icon="bookmark"></span>Saved markets<span id="side-watch-count" class="side-count">0</span></button>
+      <button class="sidebar-link" data-view="lab"><span data-icon="layers"></span>Data & features<span class="side-count">35</span></button>
+      <div class="sidebar-bottom"><div class="local-label"><span data-icon="shield"></span>Runs on your computer</div><p>No keys. No account.<br>No automatic betting.</p><div class="sidebar-version">v0.1.0 <span>Experimental model</span></div></div>
+    </aside>
+    <main id="main-content">
+      <div id="connection-banner" class="connection-banner hidden" role="alert"></div>
+      <div id="mode-banner" class="mode-banner"><span class="demo-icon" data-icon="flask"></span><span><strong>Demo workspace</strong> <span class="banner-description">Synthetic games, prices & player histories. Explore the workflow, not real betting opportunities.</span></span><button id="connect-live">Connect live data <span data-icon="arrowRight"></span></button></div>
+      <section id="markets-view">
+        <div class="page-heading"><div><div class="eyebrow">THE NBA RESEARCH DESK</div><h1 id="page-title">A clearer view of the court.</h1><p id="page-subtitle">Compare prices. Understand the model. Find the difference.</p></div><div class="heading-actions"><div class="mode-switch" aria-label="Data mode"><button class="active" data-mode="demo">Demo</button><button data-mode="live"><span class="small-dot"></span>Live data</button></div><button id="refresh-button" class="button button-outline"><span data-icon="refresh"></span><span>Refresh</span></button></div></div>
+        <div id="stats-strip" class="stats-strip"></div>
+        <div class="section-heading"><h2>On the schedule <span id="game-count"></span></h2><div class="time-switch" aria-label="Game status filter"><button class="active" data-time="all">All games</button><button data-time="live"><span class="live-dot"></span>Live</button><button data-time="upcoming">Upcoming</button></div></div>
+        <div id="games-strip" class="games-strip"></div>
+        <div class="market-workspace">
+          <section class="market-board" aria-label="Market finder">
+            <div class="board-heading"><div><h2 id="board-title">All NBA markets</h2><span id="result-count" class="muted">Loading markets…</span></div><button id="export-button" class="button button-quiet" title="Export the filtered market view"><span data-icon="download"></span>Export</button><button id="import-button" class="button button-primary"><span data-icon="plus"></span>Import odds</button></div>
+            <div class="filter-toolbar"><label class="search-box"><span data-icon="search"></span><input id="search-input" type="search" placeholder="Search players, teams, markets…" autocomplete="off" aria-label="Search markets"><kbd>/</kbd></label><button id="ev-filter" class="filter-button" aria-pressed="false"><span data-icon="sparkle"></span>+EV only</button><label class="select-wrap"><select id="book-filter" aria-label="Filter by sportsbook"><option value="">All books</option></select><span data-icon="chevronDown"></span></label><button id="more-filters" class="icon-button filter-more" title="Additional filters" aria-expanded="false" data-icon="sliders"></button></div>
+            <div id="extra-filters" class="extra-filters hidden"><label>Category <select id="category-filter"></select></label><label>Min. estimated EV <input id="min-ev" type="number" min="-100" max="500" step="0.5" value="0">%</label><label class="checkbox-label"><input id="unpriced-filter" type="checkbox">Include unpriced markets</label><label>Sort <select id="sort-filter"><option value="ev">Estimated EV ↓</option><option value="probability">Model probability ↓</option><option value="start">Game start</option><option value="player">Player / team A–Z</option></select></label><button id="clear-filters" class="text-button">Reset filters</button></div>
+            <div id="active-game-filter" class="active-game-filter hidden"></div>
+            <div class="table-scroll"><table class="markets-table"><thead><tr><th>Market</th><th>Matchup</th><th>Price</th><th title="Experimental model probability of winning, not a guaranteed success rate">Model % <span data-icon="info"></span></th><th title="Expected profit per $100 staked, based on an uncalibrated model">Model EV <span data-icon="info"></span></th><th><span class="sr-only">Save market</span></th></tr></thead><tbody id="market-rows"></tbody></table></div>
+            <div id="empty-state" class="empty-state hidden"></div>
+            <div class="board-footer"><span id="rows-status"></span><div class="pagination"><button id="prev-page" class="icon-button" title="Previous page" data-icon="chevronLeft"></button><span id="page-status">1 / 1</span><button id="next-page" class="icon-button" title="Next page" data-icon="chevronRight"></button></div></div>
+          </section>
+          <aside id="research-panel" class="research-panel" aria-label="Selected market analysis"></aside>
+        </div>
+      </section>
+      <section id="lab-view" class="hidden"></section>
+      <footer class="main-footer"><span class="footer-logo">edgecourt.</span><span>Research, not a promise. Model estimates are uncalibrated. Verify prices & settlement rules.</span><button data-view="lab">How the model works <span data-icon="arrowUpRight"></span></button></footer>
+    </main>
+  </div>
+  <dialog id="import-dialog" class="modal">
+    <div class="modal-heading"><div><div class="eyebrow">YOUR PRICES, YOUR RESEARCH</div><h2>Bring your odds to the court.</h2></div><button class="icon-button" data-close="import-dialog" aria-label="Close import dialog" data-icon="x"></button></div>
+    <p class="modal-intro">Free public feeds do not reliably expose every player prop. Add a current quote, or import your own prices and feature history.</p>
+    <div class="modal-tabs"><button class="active" data-import-tab="manual">Add a quote</button><button data-import-tab="file">File / paste</button></div>
+    <form id="manual-form">
+      <div class="form-grid"><label class="full">Game<select name="gameId" id="import-game" required></select></label><label>Market<select name="market" id="import-market"></select></label><label>Selection team<select name="team" id="import-team" required></select></label><label class="full" id="player-field">Player<input name="player" id="import-player" list="player-options" placeholder="Exact player name"><datalist id="player-options"></datalist></label><label>Side<select name="side" id="import-side"></select></label><label id="line-field">Line<input name="line" id="import-line" type="number" min="0.5" max="300" step="0.5" value="24.5"></label><label>American odds<input name="americanOdds" type="number" min="-100000" max="100000" step="1" value="-110" required></label><label>Sportsbook<input name="book" maxlength="80" placeholder="Your sportsbook" required></label></div>
+      <div class="form-note"><span data-icon="clock"></span>Stamped with the current UTC time. Full-game including overtime only. First basket means first made field goal.</div>
+      <div id="manual-error" class="form-error hidden" role="alert"></div>
+      <button id="manual-submit" type="submit" class="button button-primary full-button"><span data-icon="plus"></span>Add & evaluate quote</button>
+    </form>
+    <form id="file-form" class="hidden">
+      <div class="import-file-toolbar"><label>Format<select id="file-format"><option value="csv">CSV quotes</option><option value="json">JSON quotes + features</option><option value="html">Saved HTML (ESPN / game logs)</option></select></label><a class="button button-outline" href="/api/template.csv" download><span data-icon="download"></span>CSV template</a></div>
+      <label class="dropzone"><span data-icon="upload"></span><strong>Choose a CSV, JSON or HTML file</strong><small>Up to 4 MB · or paste its contents below</small><input id="import-file" type="file" accept=".csv,.json,.html,.htm"></label>
+      <textarea id="import-content" rows="8" spellcheck="false" placeholder='gameId,market,player,team,side,line,americanOdds,book,observedAt&#10;…' aria-label="Import file contents" required></textarea>
+      <div id="html-fields" class="form-grid hidden"><label>Game-log player name<input id="html-player" placeholder="Required for game-log HTML"></label><label>Current team (NBA abbreviation)<input id="html-team" maxlength="3" placeholder="e.g. GSW"></label><label class="full">Original price observation time (UTC)<input id="html-observed-at" maxlength="20" placeholder="Required for saved ESPN prices: YYYY-MM-DDTHH:MM:SSZ"></label></div>
+      <p class="form-note">JSON can include <code>quotes</code>, <code>games</code>, <code>players</code> and <code>teams</code>. HTML is read as data only; scripts are never executed. Imports are validated before anything changes.</p>
+      <div id="file-error" class="form-error hidden" role="alert"></div><button id="file-submit" type="submit" class="button button-primary full-button"><span data-icon="upload"></span>Validate & import</button>
+    </form>
+    <div id="import-mode-note" class="import-mode-note"></div>
+  </dialog>
+  <dialog id="settings-dialog" class="modal settings-modal">
+    <div class="modal-heading"><div><div class="eyebrow">LOCAL WORKSPACE</div><h2>Your research settings</h2></div><button class="icon-button" data-close="settings-dialog" aria-label="Close settings" data-icon="x"></button></div>
+    <label class="settings-field">Illustrative bankroll ($)<input id="bankroll-input" type="number" min="1" max="1000000000" step="1" value="1000"><small>Used only for the optional fractional-Kelly illustration. No bets are placed.</small></label>
+    <label class="checkbox-label sizing-opt"><input id="sizing-input" type="checkbox">Show experimental stake-sizing illustration</label>
+    <div class="settings-info"><span data-icon="shield"></span><div><strong>Private by default</strong><p>Your Windows executable listens on 127.0.0.1. Saved imports live in <code>%LOCALAPPDATA%\Edgecourt</code>. Browser preferences stay in this browser.</p></div></div>
+    <div class="settings-info"><span data-icon="clock"></span><div><strong>Freshness before an edge</strong><p>EV is disabled after 15 minutes for pregame prices and 90 seconds for live prices. Fresh live box scores are required. Public feeds refresh every 60 seconds; stats are cached for 6 hours.</p></div></div>
+    <button id="save-settings" class="button button-primary full-button">Save settings</button><button id="clear-imports" class="button button-danger full-button">Clear saved imports</button>
+  </dialog>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <div id="loading-overlay" class="loading-overlay"><span class="brand-mark"><i></i><i></i><i></i></span><strong>Opening your research desk…</strong><small>Built in C++. Runs locally.</small></div>
+</body>
+</html>
