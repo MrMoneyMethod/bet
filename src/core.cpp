@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include "activity.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -343,6 +344,8 @@ json empty_snapshot(const std::string &mode) {
             {"players", json::object()},
             {"teams", json::object()},
             {"quotes", json::array()},
+            {"exchangeMarkets", json::array()},
+            {"whaleTrades", json::array()},
             {"lineups", json::array()},
             {"transactions", json::array()},
             {"leagueContext", json::object()},
@@ -775,6 +778,7 @@ json demo_snapshot() {
          {"count", static_cast<int>(s["quotes"].size())},
          {"message",
           "Seeded synthetic histories, fictional matchups and simulated prices. No live bookmaker data."}}};
+    seed_demo_activity(s);
     return s;
 }
 
@@ -1370,6 +1374,7 @@ json build_dashboard(const json &snapshot) {
                    {"sources", snapshot["sources"]},
                    {"markets", json::array()},
                    {"featureCatalog", feature_catalog()},
+                   {"activity", activity_dashboard(snapshot)},
                    {"calibration", "Uncalibrated experimental baseline"},
                    {"notice", "Research only. Estimated +EV is not a validated betting edge. No auto-betting "
                               "or guarantee of profit."}};
@@ -1522,6 +1527,7 @@ json build_dashboard(const json &snapshot) {
 }
 
 json expire_dashboard(json dashboard) {
+    if (dashboard.contains("activity")) expire_activity(dashboard["activity"]);
     int positive = 0, ready = 0;
     double best = 0;
     for (auto &row : dashboard["markets"]) {

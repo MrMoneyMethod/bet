@@ -11,3 +11,5 @@ __pycache__/
 
 /releases/*.pdb
 /releases/*.lib
+
+/.venv/
