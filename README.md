@@ -41,7 +41,7 @@ This is a **working experimental baseline**, not a proven profitable or calibrat
 - Atomic CSV/JSON import validation, a constrained public-ESPN-HTML schema-fallback scraper, and saved-HTML data extraction. HTML/JavaScript is never executed by the scraper.
 - Optional illustrative quarter-Kelly sizing, **off by default**, capped at 2% of the illustrative bankroll. It is unreliable without calibrated probabilities.
 - Local persistence, response limits, fixed HTTPS source allowlist, no redirects, CSRF token, Origin/Host checks, no wildcard CORS, escaped UI text and CSV formula-injection protection.
-- C++ historical-prediction scoring CLI: Brier score, log loss, push-aware selection, flat-stake ROI and a pregame timestamp guard. No fabricated accuracy metrics.
+- C++ historical-prediction scoring CLI: Brier score, log loss, push-aware selection, flat-stake ROI and a pregame timestamp guard. Optional head-to-head scoring against every row's closing no-vig market probability, including per-market breakdowns and approximate game-clustered uncertainty. No fabricated accuracy metrics or outperformance claims.
 
 ### Freshness
 
@@ -142,9 +142,13 @@ Score **synthetic example** historical predictions (not evidence of an edge):
 
 ```sh
 ./build/Edgecourt --backtest samples/backtest-example.json
+# Paired model-vs-closing-market scoring example (also synthetic):
+./build/Edgecourt --backtest samples/market-backtest-example.json
 # Windows:
 ./Edgecourt.exe --backtest samples/backtest-example.json
 ```
+
+For real market comparisons, see the field definitions and leakage guards in [Model mathematics and limitations](docs/MODEL.md). There is no authentic historical market benchmark bundled with this repository.
 
 ## Documentation
 
