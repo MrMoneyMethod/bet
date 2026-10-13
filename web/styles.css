@@ -196,3 +196,53 @@ main{flex:1;min-width:0;padding:20px 30px 0;max-width:1900px;margin:0 auto}.mode
    header inside the viewport. */
 @media(max-width:650px){.topbar{gap:6px}.primary-nav{gap:9px}.header-actions .icon-button{width:19px}}
 .team-record{font-size:8px;color:var(--muted);white-space:nowrap}
+
+/* Debug tab: recorded popups, feed problems and browser errors. */
+.nav-count.alert{background:#fde8ea;color:#b33742}
+.nav-count.warn{background:#fff3d6;color:#8a5f10}
+.side-count.alert{background:#fde8ea;color:#b33742}
+.debug-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) minmax(0,1.6fr);gap:12px;margin-bottom:16px}
+.debug-tile{background:var(--white);border:1px solid var(--line);border-radius:9px;padding:14px 16px;box-shadow:var(--shadow)}
+.debug-tile span{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:7px}
+.debug-tile strong{font-size:20px;font-weight:700}
+.debug-tile .debug-last{font-size:12px}
+.error-text{color:var(--red)}
+.warning-text{color:var(--amber)}
+.debug-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.debug-filters{display:flex;background:#eaf0f7;border-radius:7px;padding:3px;gap:2px}
+.debug-filters button{font-size:10px;font-weight:600;color:#8191a5;padding:7px 10px;border-radius:5px}
+.debug-filters button.active{background:white;color:var(--ink);box-shadow:0 1px 4px #1525460c}
+.debug-search{max-width:420px}
+.debug-actions{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
+.debug-actions .button-danger{margin-top:0}
+.debug-showing{font-size:10px;color:var(--muted);margin-bottom:10px;min-height:13px}
+.debug-entries{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+.debug-entry{display:flex;gap:12px;background:var(--white);border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:8px;padding:12px 14px}
+.debug-entry.error{border-left-color:var(--red)}
+.debug-entry.warning{border-left-color:var(--amber)}
+.debug-level{font-size:8px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;padding:3px 6px;border-radius:4px;height:fit-content;background:var(--blue-light);color:var(--blue);white-space:nowrap;margin-top:2px}
+.debug-level.error{background:var(--red-bg);color:var(--red)}
+.debug-level.warning{background:var(--amber-bg);color:var(--amber)}
+.debug-entry-body{flex:1;min-width:0}
+.debug-entry-head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.debug-entry-head strong{font-size:11px}
+.debug-entry-head span{font-size:10px;color:var(--muted)}
+.debug-repeat{background:#f0f3f8;color:#8793a5;border-radius:4px;padding:2px 5px;font-weight:700}
+.debug-entry-body p{margin-top:5px;line-height:1.55;overflow-wrap:anywhere}
+.debug-entry-body pre{margin:8px 0 0;background:#f6f8fb;border:1px solid var(--line);border-radius:6px;padding:9px;overflow:auto;font-size:10px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px}
+.debug-empty{background:var(--white);border:1px dashed #ccd6e4;border-radius:9px;padding:22px;color:var(--muted);text-align:center;font-size:11px;line-height:1.7}
+.debug-empty strong{display:block;color:var(--ink);font-size:12px;margin-bottom:4px}
+[data-theme="dark"] .nav-count.alert{background:#4a232c;color:#ff9aa1}
+[data-theme="dark"] .nav-count.warn{background:#36290f;color:#e5b45a}
+[data-theme="dark"] .side-count.alert{background:#4a232c;color:#ff9aa1}
+[data-theme="dark"] .debug-tile{background:#101a2d}
+[data-theme="dark"] .debug-filters{background:#1a2742}
+[data-theme="dark"] .debug-filters button{color:#8fa0b8}
+[data-theme="dark"] .debug-filters button.active{background:#22345a;color:#eef4fd}
+[data-theme="dark"] .debug-entry{background:#101a2d}
+[data-theme="dark"] .debug-entry-body pre{background:#0d1729;color:#9db6dd}
+[data-theme="dark"] .debug-empty{background:#0e1830;border-color:#2a3c5f;color:#8fa0b8}
+[data-theme="dark"] .debug-empty strong{color:#c3d4ee}
+[data-theme="dark"] .debug-repeat{background:#1a2742;color:#8fa0b8}
+@media(max-width:900px){.debug-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.debug-actions{margin-left:0}}
+@media(max-width:650px){.topbar{gap:6px;padding:0 10px}.brand{font-size:19px}.primary-nav{gap:7px}.primary-nav>button{font-size:9px;gap:3px}#health-label{display:none}.debug-entry{flex-direction:column;gap:7px}}

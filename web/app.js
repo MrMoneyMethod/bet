@@ -91,9 +91,60 @@ function setThemePreference(preference) { themePreference=['light','dark','syste
 themeMedia.addEventListener?.('change',()=>{if(themePreference==='system')applyTheme();});
 applyTheme();
 const savedPref=readPreference('saved',[]);
-const state = {data:null,token:'',view:'markets',category:'all',time:'all',gameId:'',query:'',book:'',evOnly:false,minEv:0,includeUnpriced:false,sort:'ev',page:0,pageSize:8,selected:'',saved:new Set(Array.isArray(savedPref)?savedPref.filter(x=>typeof x==='string'):[]),bankroll:readPreference('bankroll',1000),showSizing:readPreference('showSizing',false),loading:false,lastMode:''};
+const state = {data:null,token:'',view:'markets',category:'all',time:'all',gameId:'',query:'',book:'',evOnly:false,minEv:0,includeUnpriced:false,sort:'ev',page:0,pageSize:8,selected:'',saved:new Set(Array.isArray(savedPref)?savedPref.filter(x=>typeof x==='string'):[]),bankroll:readPreference('bankroll',1000),showSizing:readPreference('showSizing',false),loading:false,lastMode:'',debugFilter:'all',debugQuery:''};
 let toastTimer, pollTimer;
-function toast(message, error=false) { $('#toast').textContent=message;$('#toast').classList.remove('hidden');$('#toast').classList.toggle('error',error);clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),error?6500:4000); }
+// Debug log: every popup (toast), import-form error, connection failure,
+// server-reported feed problem and browser error is recorded here so the
+// Debug tab can show it after the popup itself has disappeared. Entries are
+// kept only in this browser (localStorage), capped, and deduplicated by
+// level + message with a repeat count.
+const DEBUG_LOG_LIMIT=250;
+let debugLog=(()=>{const saved=readPreference('debugLog',[]);return Array.isArray(saved)?saved.filter(e=>e && typeof e.message==='string' && typeof e.time==='string').slice(-DEBUG_LOG_LIMIT):[];})();
+let debugSeq=debugLog.reduce((max,e)=>Math.max(max,Number(e.id)||0),0);
+const seenDiagnostics=new Set();
+function persistDebugLog() { storePreference('debugLog',debugLog.slice(-DEBUG_LOG_LIMIT)); }
+function logDebug(level, source, message, detail='') {
+  const text=String(message ?? '').trim();if(!text)return;
+  const lvl=['error','warning','info'].includes(level)?level:'info';
+  const fingerprint=`${lvl}|${text}`;
+  const existing=debugLog.find(e=>e.fingerprint===fingerprint);
+  if(existing){existing.count=(existing.count||1)+1;existing.time=nowISO();existing.source=String(source || existing.source || 'App');if(detail)existing.detail=String(detail).slice(0,2000);}
+  else debugLog.push({id:++debugSeq,time:nowISO(),level:lvl,source:String(source || 'App'),message:text.slice(0,2000),detail:String(detail || '').slice(0,2000),count:1,fingerprint});
+  if(debugLog.length>DEBUG_LOG_LIMIT)debugLog=debugLog.slice(-DEBUG_LOG_LIMIT);
+  persistDebugLog();updateDebugBadges();
+  if(typeof state!=='undefined' && state.view==='debug')renderDebug();
+}
+function formatLogArg(value) {
+  if(value instanceof Error)return value.stack || value.message;
+  if(typeof value==='string')return value;
+  try{return JSON.stringify(value);}catch{return String(value);}
+}
+const originalConsoleError=console.error.bind(console);
+const originalConsoleWarn=console.warn.bind(console);
+console.error=(...args)=>{originalConsoleError(...args);try{logDebug('error','Browser console',args.map(formatLogArg).join(' '));}catch{}};
+console.warn=(...args)=>{originalConsoleWarn(...args);try{logDebug('warning','Browser console',args.map(formatLogArg).join(' '));}catch{}};
+window.addEventListener('error',event=>{try{logDebug('error','Browser',event.message || 'Unknown browser error',event.error?.stack || (event.filename?`${event.filename}:${event.lineno||0}`:''));}catch{}});
+window.addEventListener('unhandledrejection',event=>{try{const reason=event.reason;logDebug('error','Browser',reason?.message || String(reason || 'Unhandled promise rejection'),reason?.stack || '');}catch{}});
+function toast(message, error=false, record=true) {
+  if(record)logDebug(error?'error':'info','Popup',message);
+  $('#toast').textContent=message;$('#toast').classList.remove('hidden');$('#toast').classList.toggle('error',error);clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),error?6500:4000);
+}
+// Mirror server-reported problems (feed states, history bundle) into the log
+// once per distinct problem; a later state without it is noted as recovered.
+function syncServerDiagnostics(data) {
+  const current=new Set();
+  const note=(level,source,message)=>{if(!message)return;const key=`${level}|${source}|${message}`;current.add(key);if(!seenDiagnostics.has(key)){seenDiagnostics.add(key);logDebug(level,source,message);}};
+  for(const s of data.sources || []) {
+    const label=s.label || s.id || 'Data source';
+    if(s.state==='unavailable')note('error',label,s.message || 'Source unavailable.');
+    else if(['partial','stale','import_required'].includes(s.state))note('warning',label,s.message || `Source state: ${s.state.replace(/_/g,' ')}.`);
+  }
+  const history=data.historicalData;
+  if(history && history.state==='unavailable')note('error','Historical play-by-play',history.message || 'Historical archive unavailable.');
+  for(const key of [...seenDiagnostics]) {
+    if(!current.has(key)){seenDiagnostics.delete(key);const parts=key.split('|');logDebug('info',parts[1] || 'Data source','Recovered — no longer reported in the latest server state.');}
+  }
+}
 async function api(path, body) {
   const options=body==null?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Edgecourt-Token':state.token},body:JSON.stringify(body)};
   const response=await fetch(path,options);let result;
@@ -104,11 +155,12 @@ async function api(path, body) {
 async function getState(silent=false) {
   if(state.loading)return;state.loading=true;
   try{
-    const data=await api('/api/state');state.data=data;state.token=data.authToken;
+    const data=await api('/api/state');state.data=data;state.token=data.authToken;syncServerDiagnostics(data);
     if(state.lastMode!==data.mode){state.lastMode=data.mode;state.selected='';state.gameId='';state.page=0;state.includeUnpriced=data.mode==='live' && !data.summary.quotes;$('#unpriced-filter').checked=state.includeUnpriced;}
     if(!state.selected)state.selected=(data.markets.find(m=>m.player==='Stephen Curry' && m.market==='points' && m.side==='over') || data.markets.find(m=>m.eligible) || data.markets[0] || {}).id || '';
     $('#loading-overlay').classList.add('hidden');$('#connection-banner').classList.add('hidden');render();
   }catch(error){
+    logDebug('error','Connection',error.message);
     if(!silent || !state.data){$('#loading-overlay').classList.add('hidden');$('#connection-banner').textContent=`Can't reach the local C++ server. Keep the executable window open, then reload. ${error.message}`;$('#connection-banner').classList.remove('hidden');}
   }finally{state.loading=false;}
 }
@@ -166,8 +218,10 @@ function render() {
   $('#refresh-button').classList.toggle('spinning',data.refreshing);$('#refresh-button').disabled=data.refreshing;
   $$('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===state.view));
   $('#watch-count').textContent=state.saved.size;$('#side-watch-count').textContent=state.saved.size;
-  $('#markets-view').classList.toggle('hidden',state.view==='lab');$('#lab-view').classList.toggle('hidden',state.view!=='lab');
+  updateDebugBadges();
+  $('#markets-view').classList.toggle('hidden',state.view==='lab' || state.view==='debug');$('#lab-view').classList.toggle('hidden',state.view!=='lab');$('#debug-view').classList.toggle('hidden',state.view!=='debug');
   if(state.view==='lab'){renderLab();return;}
+  if(state.view==='debug'){renderDebug();return;}
   $('#page-title').textContent=state.view==='watchlist'?'Your markets. Your watchlist.':'A clearer view of the court.';
   $('#page-subtitle').textContent=state.view==='watchlist'?'Saved for closer inspection. A saved quote is not a locked-in price.':'Compare prices. Understand the model. Find the difference.';
   renderSidebar();renderStats();renderGames();renderBooks();renderRows();renderPanel();
@@ -285,6 +339,58 @@ function renderLab() {
     <section class="lab-card"><h2>Validation before conviction</h2><p>The C++ CLI scores supplied predictions with Brier score, log loss, push-aware flat-stake ROI and a pre-game timestamp guard. To compare against the closing market, give every row a closing no-vig probability (or both closing prices), a closing timestamp and game ID. It reports paired scores overall and by market; negative model-minus-market loss favors the model. This does not train the estimator or authenticate source timestamps.</p><pre>Edgecourt.exe --backtest predictions.json</pre><p>Use true walk-forward forecasts, obtainable prices, complete matched markets, every predeclared prediction, and enough independent games. Pushes are excluded from probability scores and refunded in ROI. The approximate game-clustered interval is shown only with 30+ resolved game clusters, and is not proof of independence or profitability. No real market-beating result is established in this workspace.</p></section>
     <section class="lab-card"><h2>Built small. Built locally.</h2><p>The prediction engine, HTTP server, import validation and live public-data clients run in C++. The optional historical collector uses Python’s standard library, outside the app. The browser renders embedded HTML/CSS/JavaScript. Windows HTTPS uses the OS WinHTTP stack; no Python, Node, account or API key is required to run the executable.</p><div class="lab-ref"><a href="https://github.com/yhirose/cpp-httplib" target="_blank" rel="noopener noreferrer">cpp-httplib ${icon('arrowUpRight')}</a><a href="https://github.com/nlohmann/json" target="_blank" rel="noopener noreferrer">nlohmann/json ${icon('arrowUpRight')}</a><a href="https://github.com/swar/nba_api" target="_blank" rel="noopener noreferrer">NBA endpoint reference ${icon('arrowUpRight')}</a></div><div class="coverage-note">GitHub references are documented in the source package. Unlicensed betting repositories were researched but their code and trained model artifacts are not included.</div></section></div>`;
 }
+function debugCounts() { return debugLog.reduce((acc,e)=>(acc[e.level]=(acc[e.level]||0)+1,acc),{error:0,warning:0,info:0}); }
+function updateDebugBadges() {
+  const counts=debugCounts();const flagged=(counts.error||0)+(counts.warning||0);
+  const nav=$('#debug-count'),side=$('#side-debug-count');
+  if(nav){nav.textContent=flagged;nav.classList.toggle('alert',(counts.error||0)>0);nav.classList.toggle('warn',(counts.error||0)===0 && (counts.warning||0)>0);}
+  if(side){side.textContent=flagged;side.classList.toggle('alert',(counts.error||0)>0);}
+}
+function filteredDebugLog() {
+  const query=(state.debugQuery || '').trim().toLowerCase();
+  return [...debugLog].reverse().filter(e=>(!state.debugFilter || state.debugFilter==='all' || e.level===state.debugFilter) && (!query || `${e.level} ${e.source} ${e.message} ${e.detail || ''}`.toLowerCase().includes(query)));
+}
+function renderDebug() {
+  const view=$('#debug-view');if(!view)return;
+  if(view.dataset.ready!=='1') {
+    view.dataset.ready='1';
+    view.innerHTML=`<div class="lab-heading"><div class="eyebrow">DEBUG CONSOLE</div><h1>Every popup, kept.</h1><p>Errors and warnings that appear as popups — plus API failures, feed problems reported by the server and browser errors — are recorded here so they can be inspected after the popup disappears. Stored only in this browser; newest first.</p></div>
+    <div class="debug-tiles"><div class="debug-tile"><span>Errors</span><strong id="debug-error-count" class="error-text">0</strong></div><div class="debug-tile"><span>Warnings</span><strong id="debug-warning-count" class="warning-text">0</strong></div><div class="debug-tile"><span>Info</span><strong id="debug-info-count">0</strong></div><div class="debug-tile"><span>Total recorded</span><strong id="debug-total-count">0</strong></div><div class="debug-tile wide"><span>Last event</span><strong id="debug-last-event" class="debug-last">—</strong></div></div>
+    <div class="debug-toolbar"><div class="debug-filters" role="group" aria-label="Filter by level"><button data-debug-filter="all">All</button><button data-debug-filter="error">Errors</button><button data-debug-filter="warning">Warnings</button><button data-debug-filter="info">Info</button></div><label class="search-box debug-search"><span data-icon="search"></span><input id="debug-search" type="search" placeholder="Search source or message…" autocomplete="off" aria-label="Search debug log"></label><div class="debug-actions"><button id="debug-copy" class="button button-outline">${icon('download')}Copy</button><button id="debug-export" class="button button-outline">${icon('download')}Export JSON</button><button id="debug-clear" class="button button-danger debug-clear">Clear log</button></div></div>
+    <div id="debug-showing" class="debug-showing"></div><div id="debug-entries" class="debug-entries"></div>
+    <div class="coverage-note">Repeated identical messages are deduplicated with a ×count and their time updates to the latest occurrence. Feed errors and warnings come from the same source states shown in Model lab → Data sources. Clear the log, reproduce the problem, then Copy or Export JSON and attach it to a bug report.</div>`;
+    hydrateIcons(view);
+    $('#debug-search',view).addEventListener('input',event=>{state.debugQuery=event.target.value;renderDebugEntries();});
+  }
+  const counts=debugCounts();
+  $('#debug-error-count').textContent=counts.error||0;$('#debug-warning-count').textContent=counts.warning||0;$('#debug-info-count').textContent=counts.info||0;$('#debug-total-count').textContent=debugLog.length;
+  const last=debugLog[debugLog.length-1];$('#debug-last-event').textContent=last?new Date(last.time).toLocaleString():'—';
+  const search=$('#debug-search');if(search && search.value!==(state.debugQuery || ''))search.value=state.debugQuery || '';
+  renderDebugEntries();updateDebugBadges();
+}
+function renderDebugEntries() {
+  const list=$('#debug-entries');if(!list)return;
+  const entries=filteredDebugLog();
+  const showing=$('#debug-showing');if(showing)showing.textContent=debugLog.length?`Showing ${entries.length} of ${debugLog.length} recorded events`:'';
+  $$('[data-debug-filter]').forEach(b=>b.classList.toggle('active',b.dataset.debugFilter===(state.debugFilter || 'all')));
+  list.innerHTML=entries.length?entries.map(e=>`<article class="debug-entry ${esc(e.level)}"><span class="debug-level ${esc(e.level)}">${esc(e.level)}</span><div class="debug-entry-body"><div class="debug-entry-head"><strong>${esc(e.source)}</strong><span>${esc(new Date(e.time).toLocaleString())}</span>${(e.count||1)>1?`<span class="debug-repeat" title="Times this identical message was recorded">×${e.count}</span>`:''}</div><p>${esc(e.message)}</p>${e.detail?`<pre>${esc(e.detail)}</pre>`:''}</div></article>`).join(''):`<div class="debug-empty"><strong>${debugLog.length?'Nothing matches this filter.':'No errors or warnings recorded yet.'}</strong>${debugLog.length?'Try All levels or clear the search.':'Popups, feed problems and browser errors will appear here as they happen. Switch data modes or refresh to exercise the feeds.'}</div>`;
+}
+async function copyDebugLog() {
+  const text=JSON.stringify(debugLog,null,2);
+  try{await navigator.clipboard.writeText(text);toast('Debug log copied to the clipboard.',false,false);return;}
+  catch{/* Clipboard unavailable (permissions/insecure context): fall back below. */}
+  const area=document.createElement('textarea');area.value=text;area.setAttribute('readonly','');area.style.position='fixed';area.style.opacity='0';document.body.append(area);area.select();
+  let copied=false;try{copied=document.execCommand('copy');}catch{copied=false;}
+  area.remove();toast(copied?'Debug log copied to the clipboard.':'Could not copy the debug log — use Export JSON instead.',!copied,false);
+}
+function exportDebugLog() {
+  const url=URL.createObjectURL(new Blob([JSON.stringify({exportedAt:nowISO(),app:'Edgecourt',entries:debugLog},null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`edgecourt-debug-log-${nowISO().slice(0,10)}.json`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);toast(`Exported ${debugLog.length} debug entries.`,false,false);
+}
+function clearDebugLog() {
+  if(!window.confirm('Clear all recorded errors and warnings from this browser?'))return;
+  debugLog=[];debugSeq=0;persistDebugLog();updateDebugBadges();renderDebug();
+  toast('Debug log cleared.',false,false);
+}
 function setView(view) { state.view=view;state.page=0;render();window.scrollTo({top:0,behavior:'smooth'}); }
 function resetFilters() { state.category='all';state.time='all';state.gameId='';state.query='';state.book='';state.evOnly=false;state.minEv=0;state.sort='ev';state.page=0;state.includeUnpriced=state.data?.mode==='live' && !state.data?.summary.quotes;$('#search-input').value='';$('#min-ev').value='0';$('#sort-filter').value='ev';$('#unpriced-filter').checked=state.includeUnpriced;render(); }
 function saveMarket(id) { state.saved.has(id)?state.saved.delete(id):state.saved.add(id);storePreference('saved',[...state.saved]);render(); }
@@ -318,7 +424,7 @@ function updatePlayerOptions() {
 }
 async function submitImport(payload, formType) {
   const errorBox=$(`#${formType}-error`);const button=$(`#${formType}-submit`);errorBox.classList.add('hidden');button.disabled=true;
-  try{const result=await api('/api/import',payload);$('#import-dialog').close();await getState();toast(`Imported ${result.quotes} quotes, ${result.players} player histories, ${result.teams} teams, ${result.games} games and ${result.lineups||0} lineup confirmations. ${result.message}`);}catch(error){errorBox.textContent=error.message;errorBox.classList.remove('hidden');}finally{button.disabled=false;}
+  try{const result=await api('/api/import',payload);$('#import-dialog').close();await getState();toast(`Imported ${result.quotes} quotes, ${result.players} player histories, ${result.teams} teams, ${result.games} games and ${result.lineups||0} lineup confirmations. ${result.message}`);}catch(error){logDebug('error','Import',error.message);errorBox.textContent=error.message;errorBox.classList.remove('hidden');}finally{button.disabled=false;}
 }
 function exportMarkets() {
   const rows=filteredMarkets();const headers=['gameId','player','team','market','side','line','book','oddsPercent','observedAt','modelWinProbabilityPercent','pushProbabilityPercent','modelEVPercent','availability','reason','mode','modelVersion'];
@@ -331,6 +437,10 @@ function bindEvents() {
   document.addEventListener('click',event=>{
     const view=event.target.closest('[data-view]');if(view){setView(view.dataset.view);return;}
     const mode=event.target.closest('[data-mode]');if(mode){changeMode(mode.dataset.mode);return;}
+    const debugFilter=event.target.closest('[data-debug-filter]');if(debugFilter){state.debugFilter=debugFilter.dataset.debugFilter;renderDebug();return;}
+    if(event.target.closest('#debug-copy')){copyDebugLog();return;}
+    if(event.target.closest('#debug-export')){exportDebugLog();return;}
+    if(event.target.closest('#debug-clear')){clearDebugLog();return;}
     const category=event.target.closest('[data-category]');if(category){state.category=category.dataset.category;state.view='markets';state.page=0;render();return;}
     const time=event.target.closest('[data-time]');if(time){state.time=time.dataset.time;state.page=0;render();return;}
     const game=event.target.closest('[data-game]');if(game){state.gameId=state.gameId===game.dataset.game?'':game.dataset.game;state.page=0;render();return;}
@@ -378,4 +488,5 @@ function bindEvents() {
 
 hydrateIcons();
 if($('#category-filter'))$('#category-filter').innerHTML=categories.map(c=>`<option value="${c.id}">${c.label}</option>`).join('');
+updateDebugBadges();
 bindEvents();getState();pollTimer=setInterval(()=>{if(!document.hidden)getState(true);},15000);

@@ -53,6 +53,16 @@ try{
   await page.locator('.primary-nav [data-view="lab"]').click();assert.equal(await page.locator('.catalog-item').count(),38);assert.ok((await page.locator('#lab-view').innerText()).includes('not established an edge'));
   assert.ok(await page.locator('.history-card').isVisible());assert.match(await page.locator('.history-card').innerText(),/full crawl has not been run/);
   await page.locator('#history-reload').click();await waitToast();
+  await page.locator('.primary-nav [data-view="debug"]').click();assert.ok(await page.locator('#debug-view').isVisible());
+  assert.notEqual(await page.locator('#debug-total-count').innerText(),'0','Popup toasts must be recorded in the debug log');
+  assert.ok((await page.locator('#debug-entries').innerText()).length>0);
+  await page.evaluate(()=>console.error('Browser smoke debug error'));
+  await page.locator('.debug-entry.error').first().waitFor({state:'visible'});assert.ok((await page.locator('#debug-entries').innerText()).includes('Browser smoke debug error'));
+  assert.notEqual(await page.locator('#debug-count').innerText(),'0','Debug nav badge must count errors/warnings');
+  await page.locator('[data-debug-filter="warning"]').click();assert.equal(await page.locator('.debug-entry.error').count(),0);
+  await page.locator('[data-debug-filter="all"]').click();assert.ok(await page.locator('.debug-entry').count()>0);
+  await page.locator('#debug-search').fill('Browser smoke');assert.equal(await page.locator('.debug-entry').count(),1);await page.locator('#debug-search').fill('');
+  page.once('dialog',dialog=>dialog.accept());await page.locator('#debug-clear').click();assert.equal(await page.locator('.debug-entry').count(),0);assert.ok(await page.locator('.debug-empty').isVisible());
   await page.locator('.primary-nav [data-view="markets"]').click();
   await page.locator('#import-button').click();await page.locator('#import-game').selectOption('demo-2');await page.locator('#import-market').selectOption('points');await page.locator('#import-team').selectOption('GSW');
   await page.locator('#import-player').fill('Stephen Curry');await page.locator('#import-line').fill('26.5');await page.locator('[name="oddsPercent"]').fill('46.51');await page.locator('[name="book"]').fill('Browser quote');await page.locator('#manual-submit').click();
@@ -76,5 +86,5 @@ try{
   await page.setViewportSize({width:1440,height:1000});await page.locator('#settings-button').click();await page.locator('#sizing-input').uncheck();await page.locator('#save-settings').click();await page.locator('#more-filters').click();
   await page.screenshot({path:'.cache/browser-results/desktop.png',fullPage:true});
   assert.deepEqual(errors,[]);
-  console.log('PASS browser: dark-mode toggle + persistence, percentage-only prices/input/CSV export, historical coverage/reload, category/search/EV filters, watchlist, game/status filters, model lab, manual/file import, validation errors, safe HTML escaping, CSV export, pagination, settings, mobile category access and responsive layout.');
+  console.log('PASS browser: debug log tab (popup/console capture, filters, search, clear), dark-mode toggle + persistence, percentage-only prices/input/CSV export, historical coverage/reload, category/search/EV filters, watchlist, game/status filters, model lab, manual/file import, validation errors, safe HTML escaping, CSV export, pagination, settings, mobile category access and responsive layout.');
 }finally{await browser.close();}
