@@ -8,7 +8,7 @@
 - The native provider probe was run. **No provider returned an HTTP response in this sandbox**: outbound HTTPS to sports/exchange hosts is restricted. See [provider-probe.json](provider-probe.json) for actual statuses and errors, including requests suppressed by the host circuit.
 - Fixture tests verify parser behavior and the real refresh/cache pipeline using an injected transport. They do **not** verify current upstream schemas, credentials, coverage, provider uptime or executable prices.
 - Exchange activity and mocked refresh/cache tests also pass with GCC UndefinedBehaviorSanitizer enabled (`-fsanitize=undefined -fno-sanitize-recover=all`).
-- Existing checked-in Windows release binaries have **not** been rebuilt in this change. Build from current source or use the repository's Windows CI workflow for these features.
+- Windows release artifacts were subsequently rebuilt on this branch with Zig 0.13.0 (x86_64-windows-gnu), including the new activity module and embedded UI. PE architecture, DLL imports, ZIP integrity and SHA-256 manifests were inspected; the binary has **not** been runtime-tested on Windows here.
 
 The review focused on the first-party network, parsing, state, model-isolation and UI paths affected by this change. Vendored `nlohmann/json` and `cpp-httplib` headers were not independently re-audited. This is not an exhaustive security certification or a claim that every upstream endpoint is working.
 

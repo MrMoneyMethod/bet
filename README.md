@@ -1,4 +1,4 @@
-> **Volume & whales update:** Open **Volume & whales** for public exchange turnover, large Polymarket wallet fills, filters and sample export. This is **not sportsbook handle**. Sportsbook API2 and SportScore have been removed because their configured contracts were speculative. [Audit, test results and live-verification limits](docs/API_AUDIT.md). Build from source for this update; checked-in Windows binaries predate it.
+> **Volume & whales update:** Open **Volume & whales** for public exchange turnover, large Polymarket wallet fills, filters and sample export. This is **not sportsbook handle**. Sportsbook API2 and SportScore have been removed because their configured contracts were speculative. [Audit, test results and live-verification limits](docs/API_AUDIT.md). The Windows EXE and ZIP have been rebuilt from this branch with the update; the cross-built binary has not been runtime-tested on Windows here.
 
 # Edgecourt
 
