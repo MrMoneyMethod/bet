@@ -10,7 +10,7 @@ labeled indicative (fees, liquidity and settlement rules differ from sportsbooks
 
 | Source | What it gives | Access notes | Status in Edgecourt |
 |---|---|---|---|
-| ESPN site API `site.api.espn.com/apis/site/v2/sports/basketball/nba` | Schedule, scores, moneylines when explicitly published, summaries, injuries, rosters | Public undocumented JSON; 403/429 stop fallback scraping | Integrated |
+| ESPN site API `site.api.espn.com/apis/site/v2/sports/basketball/nba` | Schedule (preseason, regular season and postseason as published), scores, moneylines when explicitly published, summaries, injuries, rosters | Public undocumented JSON; scoreboard fetched one day at a time because hyphenated date ranges now return HTTP 400; 403/429 stop fallback scraping | Integrated |
 | NBA CDN `cdn.nba.com/static/json` | Schedule, live box scores, live play-by-play | Public static JSON | Integrated |
 | stats.nba.com | Team game logs, rosters, player index | Keyless but needs browser-like headers; rate-limit/timeout prone | Integrated |
 | **Polymarket Gamma API** `gamma-api.polymarket.com` | NBA events/markets; `outcomePrices` are traded probabilities 0–1 | Fully public read API (CLOB `clob.polymarket.com` market data and `data-api.polymarket.com` also public; trading needs a wallet) | **Integrated: game moneylines** as native % (`price × 100`), book "Polymarket". Futures/spreads/totals ignored. During preseason only futures were live; game markets are matched defensively by team names + date window |

@@ -26,6 +26,9 @@
 namespace edgecourt {
 namespace {
 constexpr size_t MAX_RESPONSE = 16 * 1024 * 1024;
+// Hard per-refresh network budget shared by every public source. Schedule and
+// moneyline fetches run first so stats/roster enrichment cannot starve them.
+constexpr int MAX_REQUESTS_PER_REFRESH = 36;
 long long now_seconds() {
     return parse_time(now_iso());
 }
@@ -43,6 +46,34 @@ std::string clean_timestamp(std::string value) {
     if (value.size() > 20 && value[19] == '.')
         value = value.substr(0, 19) + "Z";
     return value;
+}
+// ESPN season.type: 1 preseason, 2 regular season, 3 postseason, 4 off-season.
+// Games are kept under the type ESPN publishes for them; preseason stays in the
+// schedule/data (with its prices) even though model projections stay guarded.
+std::string espn_season_type(const json &event) {
+    const auto season = event.value("season", json::object());
+    const auto slug = season.value("slug", "");
+    if (slug.find("preseason") != std::string::npos || slug.find("pre-season") != std::string::npos)
+        return "preseason";
+    if (slug.find("post") != std::string::npos || slug.find("playoff") != std::string::npos)
+        return "playoffs";
+    switch (static_cast<int>(number(season.value("type", json(2))))) {
+    case 1:
+        return "preseason";
+    case 3:
+        return "playoffs";
+    default:
+        return "regular";
+    }
+}
+// NBA CDN game ids lead with a competition prefix: 001 preseason, 002 regular
+// season, 004 playoffs (other prefixes keep the regular-season default).
+std::string nba_season_type(const std::string &id) {
+    if (id.rfind("001", 0) == 0)
+        return "preseason";
+    if (id.rfind("004", 0) == 0)
+        return "playoffs";
+    return "regular";
 }
 std::string clean_date(std::string value) {
     if (value.size() >= 10 && value[4] == '-')
@@ -224,6 +255,22 @@ bool allowed_data_url(const std::string &url) {
         "gamma-api\\.polymarket\\.com|external-api\\.kalshi\\.com|guest\\.api\\.arcadia\\.pinnacle\\.com)"
         "/[^\\r\\n\\t \"]*$");
     return url.size() < 4096 && std::regex_match(url, expression);
+}
+std::vector<std::string> espn_scoreboard_day_urls(long long first_epoch, long long last_epoch) {
+    std::vector<std::string> urls;
+    const auto first = parse_time(iso_at(first_epoch).substr(0, 10) + "T00:00:00Z"),
+               last = parse_time(iso_at(last_epoch).substr(0, 10) + "T00:00:00Z");
+    if (!first || !last || last < first)
+        return urls;
+    // Inclusive UTC days, hard-capped so a bad window can never fan out into an
+    // unbounded request burst against a public, undocumented endpoint.
+    for (auto day = first; day <= last && urls.size() < 14; day += 86400) {
+        auto stamp = iso_at(day).substr(0, 10);
+        stamp.erase(std::remove(stamp.begin(), stamp.end(), '-'), stamp.end());
+        urls.push_back("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=" +
+                       stamp + "&limit=100");
+    }
+    return urls;
 }
 HttpResponse public_get(const std::string &url) {
     HttpResponse response;
@@ -437,9 +484,7 @@ void parse_espn_scoreboard(const json &doc, json &s, const std::string &fetched)
                   {"elapsedMinutes", elapsed_minutes(period, clock)},
                   {"source", "espn"},
                   {"dataAsOf", fetched},
-                  {"seasonType", number(event.value("season", json::object()).value("type", json(2))) == 1
-                                     ? "preseason"
-                                     : "regular"}};
+                  {"seasonType", espn_season_type(event)}};
         g["liveScoresComplete"] =
             std::isfinite(number(home.value("score", json()), std::numeric_limits<double>::quiet_NaN())) &&
             std::isfinite(number(away.value("score", json()), std::numeric_limits<double>::quiet_NaN()));
@@ -498,7 +543,7 @@ void parse_nba_scoreboard(const json &doc, json &s, const std::string &fetched) 
             {"elapsedMinutes", elapsed_minutes(period, clock)},
             {"dataAsOf", fetched},
             {"source", "nba_cdn"},
-            {"seasonType", id.rfind("001", 0) == 0 ? "preseason" : "regular"}};
+            {"seasonType", nba_season_type(id)}};
         g["liveScoresComplete"] = std::isfinite(number(raw["homeTeam"].value("score", json()),
                                                        std::numeric_limits<double>::quiet_NaN())) &&
                                   std::isfinite(number(raw["awayTeam"].value("score", json()),
@@ -1142,7 +1187,7 @@ FeedResponse PublicFeeds::get(const std::string &url, int ttl, int max_stale) {
         response.cached = true;
         return response;
     }
-    if (requests_ >= 36) {
+    if (requests_ >= MAX_REQUESTS_PER_REFRESH) {
         response.error = "Per-refresh public-source request budget reached";
     } else {
         if (requests_ > 0)
@@ -1179,23 +1224,63 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     s["players"] = previous.value("players", json::object());
     s["teams"] = previous.value("teams", json::object());
     // The date window uses UTC dates so no local timezone assumption enters scheduled starts.
-    auto begin = iso_at(now_seconds() - 86400).substr(0, 10),
-         end = iso_at(now_seconds() + 7 * 86400).substr(0, 10);
-    begin.erase(std::remove(begin.begin(), begin.end(), '-'), begin.end());
-    end.erase(std::remove(end.begin(), end.end(), '-'), end.end());
-    auto espn = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=" + begin +
-                        "-" + end + "&limit=100",
-                    45, 0);
-    if (!espn.data.is_null())
-        parse_espn_scoreboard(espn.data, s, espn.fetched_at);
-    s["sources"].push_back(source("espn", "ESPN schedule + public moneylines", espn,
+    // ESPN's site API rejects hyphenated date ranges with HTTP 400 ("Failed to get
+    // events endpoint"), so the window is fetched one day at a time and merged by
+    // event id (upsert_game deduplicates). Preseason, regular-season and postseason
+    // events are all kept exactly as ESPN types them for each day.
+    const auto day_urls = espn_scoreboard_day_urls(now_seconds() - 86400, now_seconds() + 7 * 86400);
+    FeedResponse espn;
+    int espn_days_ok = 0, espn_days_failed = 0;
+    bool espn_contract_ok = false, espn_denied = false, espn_cached = false;
+    for (const auto &url : day_urls) {
+        if (cancelled_ && cancelled_->load())
+            break;
+        auto day = get(url, 45, 0);
+        if (day.data.is_null()) {
+            ++espn_days_failed;
+            if (espn.error.empty())
+                espn.error = day.error;
+            if (!espn.status)
+                espn.status = day.status;
+            if (day.status == 403 || day.status == 429)
+                espn_denied = true;
+            continue;
+        }
+        ++espn_days_ok;
+        espn_cached = espn_cached || day.cached;
+        if (day.data.contains("events") && day.data["events"].is_array())
+            espn_contract_ok = true;
+        if (espn.fetched_at.empty() || day.fetched_at > espn.fetched_at)
+            espn.fetched_at = day.fetched_at;
+        parse_espn_scoreboard(day.data, s, day.fetched_at);
+    }
+    if (espn_days_ok) {
+        espn.data = json::object(); // At least one day answered; details go in the source card.
+        espn.cached = espn_cached;
+    }
+    {
+        json espn_source = source("espn", "ESPN schedule + public moneylines", espn,
                                   static_cast<int>(s["games"].size()),
-                                  "Public, undocumented endpoint. Moneylines only when the response "
-                                  "explicitly includes them; no inferred player prices."));
-    // A fixed public-page scraper, not a challenge bypass: only use it when the JSON
-    // endpoint changes its contract (404 / successful unsupported body), never after 403/429.
-    if ((espn.status == 404 || espn.status == 200) &&
-        (espn.data.is_null() || !espn.data.contains("events")) && requests_ < 36 &&
+                                  "Public, undocumented endpoint, fetched one day at a time because "
+                                  "date ranges now return HTTP 400. Moneylines only when a response "
+                                  "explicitly includes them; no inferred player prices.");
+        if (espn_days_ok && espn_days_failed) {
+            espn_source["state"] = "partial";
+            espn_source["message"] = std::string(espn_source.value("message", "")) + " " +
+                                     std::to_string(espn_days_ok) + " of " +
+                                     std::to_string(day_urls.size()) +
+                                     " days returned; failed days are missing, not backfilled (" +
+                                     espn.error + ").";
+        } else if (espn_days_ok) {
+            espn_source["message"] = std::string(espn_source.value("message", "")) + " " +
+                                     std::to_string(espn_days_ok) + " daily scoreboards merged, " +
+                                     "including preseason and upcoming games as published.";
+        }
+        s["sources"].push_back(espn_source);
+    }
+    // A fixed public-page scraper, not a challenge bypass: only use it when no daily
+    // JSON response followed the known contract, never after 403/429 access denial.
+    if (!espn_contract_ok && !espn_denied && requests_ < MAX_REQUESTS_PER_REFRESH &&
         !(cancelled_ && cancelled_->load())) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         ++requests_;
@@ -1240,112 +1325,11 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     s["sources"].push_back(
         source("nba-live", "NBA live scoreboard", nba, static_cast<int>(s["games"].size()),
                "Scores, period and game clock. NBA CDN is keyless; availability is not guaranteed."));
-    auto season = nba_season(now_seconds());
-    auto date_from = iso_at(now_seconds() - 210 * 86400).substr(0, 10);
-    const auto player_url = [&](const std::string &year) {
-        return "https://stats.nba.com/stats/playergamelogs?DateFrom=" + date_from +
-               "&DateTo=&GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&"
-               "OpponentTeamID=0&Outcome=&PORound=0&PerMode=Totals&Period=0&PlayerID=&Season=" +
-               year +
-               "&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&TeamID=0&VsConference=&"
-               "VsDivision=";
-    };
-    auto players = get(player_url(season), 21600, 172800);
-    if (!players.data.is_null() && nba_rows(players.data).empty()) {
-        season = nba_season(now_seconds(), true);
-        players = get(player_url(season), 21600, 172800);
-    }
-    if (!players.data.is_null())
-        parse_player_logs(players.data, s, players.fetched_at);
-    s["sources"].push_back(source("nba-players", "NBA historical player logs", players,
-                                  static_cast<int>(s["players"].size()),
-                                  "Recent minutes, P/R/A, 3PM, STL/BLK and shooting detail. Prior season is "
-                                  "used only if the current-season response is empty. Season: " +
-                                      season + "."));
-    const auto ratings_url =
-        "https://stats.nba.com/stats/"
-        "leaguedashteamstats?Conference=&DateFrom=&DateTo=&Division=&GameScope=&GameSegment=&LastNGames=0&"
-        "LeagueID=00&Location=&MeasureType=Advanced&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&"
-        "PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season=" +
-        season +
-        "&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&StarterBench=&TeamID=0&TwoWay=0&"
-        "VsConference=&VsDivision=";
-    auto ratings = get(ratings_url, 21600, 172800);
-    if (!ratings.data.is_null())
-        parse_team_ratings(ratings.data, s, ratings.fetched_at);
-    auto teamlogs = get("https://stats.nba.com/stats/leaguegamelog?Counter=0&DateFrom=" + date_from +
-                            "&DateTo=&Direction=DESC&LeagueID=00&PlayerOrTeam=T&Season=" + season +
-                            "&SeasonType=Regular%20Season&Sorter=DATE",
-                        21600, 172800);
-    if (!teamlogs.data.is_null())
-        parse_team_logs(teamlogs.data, s, teamlogs.fetched_at);
-    s["sources"].push_back(
-        source("nba-teams", "NBA advanced team environment", ratings, static_cast<int>(s["teams"].size()),
-               "Pace, offensive/defensive ratings. Historical team results supply Elo, variance and rest."));
-    s["sources"].push_back(source(
-        "nba-teamlogs", "NBA team results + chronological Elo", teamlogs, static_cast<int>(s["teams"].size()),
-        "Elo is updated only after resolved paired games. No trained model weights are claimed."));
-    std::set<std::string> active;
-    for (const auto &game : s["games"])
-        if (game.value("status", "") != "final" &&
-            parse_time(game.value("startsAt", "")) < now_seconds() + 3 * 86400) {
-            active.insert(game.value("home", ""));
-            active.insert(game.value("away", ""));
-        }
-    int roster_count = 0, roster_failures = 0;
-    if (!s["games"].empty())
-        for (const auto &team : active) {
-            if (!s["teams"].contains(team) || !s["teams"][team].contains("espnId"))
-                continue;
-            auto roster = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/" +
-                                  s["teams"][team].value("espnId", "") + "/roster",
-                              3600, 7200);
-            if (!roster.data.is_null()) {
-                parse_espn_roster(roster.data, s, team, roster.fetched_at);
-                ++roster_count;
-            } else
-                ++roster_failures;
-        }
-    s["sources"].push_back(
-        {{"id", "rosters"},
-         {"label", "ESPN roster + injury context"},
-         {"state", roster_count ? "ok" : "unavailable"},
-         {"updatedAt", roster_count ? now_iso() : ""},
-         {"count", roster_count},
-         {"message", "Fetched " + std::to_string(roster_count) + " active team rosters; " +
-                         std::to_string(roster_failures) +
-                         " failed. Injury feeds may lag and are not a confirmed starting lineup."}});
-    int summaries = 0;
-    if (!s["games"].empty())
-        for (const auto &game : s["games"]) {
-            if (game.value("status", "") != "live" || !game.contains("espnId") || summaries >= 6)
-                continue;
-            auto summary = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=" +
-                                   game.value("espnId", ""),
-                               30, 0);
-            if (!summary.data.is_null()) {
-                parse_espn_summary(summary.data, s, game, summary.fetched_at);
-                ++summaries;
-            }
-        }
-    s["sources"].push_back({{"id", "boxscores"},
-                            {"label", "ESPN live player box scores"},
-                            {"state", summaries ? "ok" : "idle"},
-                            {"updatedAt", summaries ? now_iso() : ""},
-                            {"count", summaries},
-                            {"message", "Fresh accrued stats are mandatory for in-play props. No live player "
-                                        "value is extrapolated from a pregame-only feed."}});
-    s["sources"].push_back(
-        {{"id", "prop-odds"},
-         {"label", "Player-prop & team-total odds"},
-         {"state", "import_required"},
-         {"updatedAt", ""},
-         {"count", 0},
-         {"message", "There is no bundled reliable free/keyless all-books prop feed. Import current CSV/JSON "
-                     "quotes. First basket also requires explicit history and confirmed starters."}});
-    // Keyless traded/sharp moneyline prices. Only quotes matching an already
-    // scheduled game are kept; these venues publish probabilities/American prices,
-    // never player statistics, and their prices are indicative exchange/book prices.
+    // Keyless traded/sharp moneyline prices run before stats/roster enrichment so
+    // the shared request budget cannot starve them. Only quotes matching an already
+    // scheduled game (preseason included) are kept; these venues publish
+    // probabilities/American prices, never player statistics, and their prices are
+    // indicative exchange/book prices.
     auto polymarket = get(
         "https://gamma-api.polymarket.com/events?tag_slug=nba&active=true&closed=false&limit=100", 60, 300);
     int polymarket_count = 0;
@@ -1398,6 +1382,111 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     s["sources"].push_back(source("pinnacle", "Pinnacle NBA moneylines", pinnacle_state, pinnacle_count,
                                   "Anonymous guest feed used by Pinnacle's public site; American prices "
                                   "converted to percentages. Undocumented and can change or block."));
+    auto season = nba_season(now_seconds());
+    auto date_from = iso_at(now_seconds() - 210 * 86400).substr(0, 10);
+    const auto player_url = [&](const std::string &year) {
+        return "https://stats.nba.com/stats/playergamelogs?DateFrom=" + date_from +
+               "&DateTo=&GameSegment=&LastNGames=0&LeagueID=00&Location=&MeasureType=Base&Month=0&"
+               "OpponentTeamID=0&Outcome=&PORound=0&PerMode=Totals&Period=0&PlayerID=&Season=" +
+               year +
+               "&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&TeamID=0&VsConference=&"
+               "VsDivision=";
+    };
+    auto players = get(player_url(season), 21600, 172800);
+    if (!players.data.is_null() && nba_rows(players.data).empty()) {
+        season = nba_season(now_seconds(), true);
+        players = get(player_url(season), 21600, 172800);
+    }
+    if (!players.data.is_null())
+        parse_player_logs(players.data, s, players.fetched_at);
+    s["sources"].push_back(source("nba-players", "NBA historical player logs", players,
+                                  static_cast<int>(s["players"].size()),
+                                  "Recent minutes, P/R/A, 3PM, STL/BLK and shooting detail. Prior season is "
+                                  "used only if the current-season response is empty. Season: " +
+                                      season + "."));
+    const auto ratings_url =
+        "https://stats.nba.com/stats/"
+        "leaguedashteamstats?Conference=&DateFrom=&DateTo=&Division=&GameScope=&GameSegment=&LastNGames=0&"
+        "LeagueID=00&Location=&MeasureType=Advanced&Month=0&OpponentTeamID=0&Outcome=&PORound=0&PaceAdjust=N&"
+        "PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season=" +
+        season +
+        "&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&StarterBench=&TeamID=0&TwoWay=0&"
+        "VsConference=&VsDivision=";
+    auto ratings = get(ratings_url, 21600, 172800);
+    if (!ratings.data.is_null())
+        parse_team_ratings(ratings.data, s, ratings.fetched_at);
+    auto teamlogs = get("https://stats.nba.com/stats/leaguegamelog?Counter=0&DateFrom=" + date_from +
+                            "&DateTo=&Direction=DESC&LeagueID=00&PlayerOrTeam=T&Season=" + season +
+                            "&SeasonType=Regular%20Season&Sorter=DATE",
+                        21600, 172800);
+    if (!teamlogs.data.is_null())
+        parse_team_logs(teamlogs.data, s, teamlogs.fetched_at);
+    s["sources"].push_back(
+        source("nba-teams", "NBA advanced team environment", ratings, static_cast<int>(s["teams"].size()),
+               "Pace, offensive/defensive ratings. Historical team results supply Elo, variance and rest."));
+    s["sources"].push_back(source(
+        "nba-teamlogs", "NBA team results + chronological Elo", teamlogs, static_cast<int>(s["teams"].size()),
+        "Elo is updated only after resolved paired games. No trained model weights are claimed."));
+    std::set<std::string> active;
+    for (const auto &game : s["games"])
+        if (game.value("status", "") != "final" &&
+            parse_time(game.value("startsAt", "")) < now_seconds() + 3 * 86400) {
+            active.insert(game.value("home", ""));
+            active.insert(game.value("away", ""));
+        }
+    // Live summaries outrank roster enrichment: fresh box scores gate in-play
+    // eligibility, while rosters are hourly-cached context.
+    int summaries = 0;
+    if (!s["games"].empty())
+        for (const auto &game : s["games"]) {
+            if (game.value("status", "") != "live" || !game.contains("espnId") || summaries >= 6)
+                continue;
+            auto summary = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=" +
+                                   game.value("espnId", ""),
+                               30, 0);
+            if (!summary.data.is_null()) {
+                parse_espn_summary(summary.data, s, game, summary.fetched_at);
+                ++summaries;
+            }
+        }
+    s["sources"].push_back({{"id", "boxscores"},
+                            {"label", "ESPN live player box scores"},
+                            {"state", summaries ? "ok" : "idle"},
+                            {"updatedAt", summaries ? now_iso() : ""},
+                            {"count", summaries},
+                            {"message", "Fresh accrued stats are mandatory for in-play props. No live player "
+                                        "value is extrapolated from a pregame-only feed."}});
+    int roster_count = 0, roster_failures = 0;
+    if (!s["games"].empty())
+        for (const auto &team : active) {
+            if (!s["teams"].contains(team) || !s["teams"][team].contains("espnId"))
+                continue;
+            auto roster = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/" +
+                                  s["teams"][team].value("espnId", "") + "/roster",
+                              3600, 7200);
+            if (!roster.data.is_null()) {
+                parse_espn_roster(roster.data, s, team, roster.fetched_at);
+                ++roster_count;
+            } else
+                ++roster_failures;
+        }
+    s["sources"].push_back(
+        {{"id", "rosters"},
+         {"label", "ESPN roster + injury context"},
+         {"state", roster_count ? "ok" : "unavailable"},
+         {"updatedAt", roster_count ? now_iso() : ""},
+         {"count", roster_count},
+         {"message", "Fetched " + std::to_string(roster_count) + " active team rosters; " +
+                         std::to_string(roster_failures) +
+                         " failed. Injury feeds may lag and are not a confirmed starting lineup."}});
+    s["sources"].push_back(
+        {{"id", "prop-odds"},
+         {"label", "Player-prop & team-total odds"},
+         {"state", "import_required"},
+         {"updatedAt", ""},
+         {"count", 0},
+         {"message", "There is no bundled reliable free/keyless all-books prop feed. Import current CSV/JSON "
+                     "quotes. First basket also requires explicit history and confirmed starters."}});
     // Keep only players on active teams in the browser workspace. Cache retains full historical responses.
     for (auto it = s["players"].begin(); it != s["players"].end();) {
         auto team = it.value().value("team", "");

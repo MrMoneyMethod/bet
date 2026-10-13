@@ -44,7 +44,7 @@ Cached model computations are not allowed to freeze eligibility. `/api/state` re
 - `imports.json`: validated real-data workspace imports; quote times preserved.
 - `cache/*.json`: bounded provider response caches keyed by URL hash, with original retrieval times and URLs.
 
-Writes use a temporary file then replacement (`MoveFileExW` on Windows, filesystem rename on Linux). No external database or model download is needed to run the native app. Optional historical collection uses Python's built-in SQLite; the executable reads only its streamed feature export. Watchlist/bankroll/display settings use this browser's localStorage; they are not cloud-synced and are not encrypted.
+Writes use a temporary file then replacement (`MoveFileExW` on Windows, filesystem rename on Linux). No external database or model download is needed to run the native app. Optional historical collection uses Python's built-in SQLite; the executable reads only its streamed feature export. Watchlist/bankroll/display settings (including the light/dark/system appearance preference) use this browser's localStorage; they are not cloud-synced and are not encrypted.
 
 ## Network boundaries
 
