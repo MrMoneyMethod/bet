@@ -1374,6 +1374,37 @@ int main() {
         auto empty = empty_snapshot("live");
         parse_official_schedule(doc, empty, now_iso());
         check(empty["games"].empty(), "Official schedule never creates slate games");
+        auto nullable = doc;
+        nullable["leagueSchedule"]["seasonYear"] = nullptr;
+        nullable["leagueSchedule"]["leagueId"] = nullptr;
+        nullable["leagueSchedule"]["weeks"] = nullptr;
+        auto &nullable_game = nullable["leagueSchedule"]["gameDates"][0]["games"][0];
+        for (const auto *field : {"gameCode", "gameStatusText", "arenaName", "arenaCity", "arenaState",
+                                  "postponedStatus", "seriesText", "gameLabel", "gameSubLabel"})
+            nullable_game[field] = nullptr;
+        nullable_game["isNeutral"] = nullptr;
+        nullable_game["broadcasters"] = {
+            {"nationalBroadcasters", json::array({nullptr, {{"broadcasterDisplay", nullptr}},
+                                                   {{"broadcasterDisplay", "ESPN"}}})},
+            {"homeTvBroadcasters", nullptr}};
+        nullable_game["pointsLeaders"] = json::array({
+            nullptr,
+            {{"firstName", nullptr}, {"lastName", "Curry"}, {"teamTricode", nullptr}, {"points", nullptr}}});
+        nullable["leagueSchedule"]["gameDates"][0]["games"].push_back(
+            {{"gameId", nullptr}, {"gameDateTimeUTC", nullptr}, {"homeTeam", nullptr}, {"awayTeam", nullptr}});
+        auto tolerant = demo;
+        parse_official_schedule(nullable, tolerant, now_iso());
+        check(tolerant["leagueContext"]["schedule"]["matchedGames"] == 1,
+              "Explicit null optional fields do not discard a valid scheduled game");
+        check(tolerant["leagueContext"]["schedule"]["seasonYear"] == "" &&
+                  tolerant["leagueContext"]["schedule"]["leagueId"] == "" &&
+                  tolerant["leagueContext"]["schedule"]["weeks"] == 0,
+              "Nullable schedule summary fields fall back safely");
+        check(tolerant["games"][1]["gameCode"] == "" && tolerant["games"][1]["arenaName"] == "" &&
+                  tolerant["games"][1]["broadcasts"]["national"].size() == 1 &&
+                  tolerant["games"][1]["broadcasts"]["national"][0] == "ESPN" &&
+                  tolerant["games"][1]["pointsLeaders"][0]["name"] == "Curry",
+              "Nullable broadcaster/player fields are skipped while valid sibling context is retained");
     });
     test("NBA daily lineups confirm only explicit starters for the first-basket guard", [&] {
         check(daily_lineup_date_token(parse_time("2026-10-13T02:00:00Z")) == "20261012",
