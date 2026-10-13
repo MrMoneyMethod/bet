@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <random>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -276,6 +277,23 @@ std::vector<std::string> espn_scoreboard_day_urls(long long first_epoch, long lo
     }
     return urls;
 }
+std::string pinnacle_device_uuid() {
+    // Pinnacle's public web client identifies itself with an anonymous,
+    // per-visitor device UUID (visible in any browser's request headers to
+    // the guest API). It is not an account or credential; generate one per
+    // process and reuse it, exactly like a browser profile would.
+    static const std::string uuid = [] {
+        std::mt19937_64 rng(std::random_device{}());
+        auto part = [&rng] {
+            std::ostringstream out;
+            out << std::hex << std::setw(8) << std::setfill('0')
+                << static_cast<unsigned long>(rng() & 0xffffffffULL);
+            return out.str();
+        };
+        return part() + "-" + part() + "-" + part() + "-" + part();
+    }();
+    return uuid;
+}
 std::vector<std::pair<std::string, std::string>> public_request_headers(const std::string &url) {
     std::vector<std::pair<std::string, std::string>> headers = {
         {"Accept", "application/json, text/html;q=0.9"}, {"Referer", "https://www.nba.com/"}};
@@ -287,6 +305,7 @@ std::vector<std::pair<std::string, std::string>> public_request_headers(const st
         // Pinnacle rotates it, the source reports unavailable honestly.
         headers[1].second = "https://www.pinnacle.com/";
         headers.push_back({"X-API-Key", "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"});
+        headers.push_back({"X-Device-UUID", pinnacle_device_uuid()});
     }
     return headers;
 }
@@ -925,6 +944,15 @@ json array_field(const json &value) {
     }
     return json::array();
 }
+// Public payloads routinely carry explicit JSON nulls where a string is
+// expected; nlohmann's value(key, "") throws type_error.302 on those. Always
+// read optional string fields through this helper in feed parsers.
+std::string string_field(const json &object, const char *key, const std::string &fallback = "") {
+    if (!object.is_object())
+        return fallback;
+    const auto it = object.find(key);
+    return it != object.end() && it->is_string() ? it->get<std::string>() : fallback;
+}
 const json *find_game(const json &snapshot, const std::string &home, const std::string &away) {
     for (const auto &game : snapshot["games"])
         if (game.value("home", "") == home && game.value("away", "") == away)
@@ -1053,29 +1081,32 @@ void parse_pinnacle_markets(const json &matchups, const json &markets, json &s, 
     std::map<long long, json> participants;
     std::map<long long, json> games_by_matchup;
     for (const auto &matchup : array_field(matchups)) {
-        if (!matchup.is_object() || matchup.value("type", "matchup") != "matchup")
+        if (!matchup.is_object() || string_field(matchup, "type", "matchup") != "matchup")
             continue;
         std::string home, away;
         for (const auto &participant : array_field(matchup.value("participants", json()))) {
-            const auto abbr = abbr_from_name(participant.value("name", ""));
+            const auto abbr = abbr_from_name(string_field(participant, "name"));
             if (abbr.empty())
                 continue;
+            const auto alignment = string_field(participant, "alignment");
             participants[static_cast<long long>(number(participant.value("id", json()), -1))] = {
-                {"abbr", abbr}, {"alignment", participant.value("alignment", "")}};
-            if (participant.value("alignment", "") == "home")
+                {"abbr", abbr}, {"alignment", alignment}};
+            if (alignment == "home")
                 home = abbr;
-            else if (participant.value("alignment", "") == "away")
+            else if (alignment == "away")
                 away = abbr;
         }
-        if (!home.empty() && !away.empty())
+        if (!home.empty() && !away.empty()) {
+            auto starts_at = string_field(matchup, "startTime");
+            if (starts_at.empty())
+                starts_at = string_field(matchup, "startsAt");
             games_by_matchup[static_cast<long long>(number(matchup.value("id", json()), -1))] = {
-                {"home", home},
-                {"away", away},
-                {"startsAt", matchup.value("startTime", matchup.value("startsAt", ""))}};
+                {"home", home}, {"away", away}, {"startsAt", starts_at}};
+        }
     }
     for (const auto &market : array_field(markets)) {
-        if (!market.is_object() || market.value("key", "") != "s;0;m" ||
-            market.value("status", "open") == "suspended")
+        if (!market.is_object() || string_field(market, "key") != "s;0;m" ||
+            string_field(market, "status", "open") == "suspended")
             continue;
         const auto found =
             games_by_matchup.find(static_cast<long long>(number(market.value("matchupId", json()), -1)));
@@ -1141,17 +1172,17 @@ void parse_nba_cdn_odds(const json &doc, json &s, const std::string &fetched) {
             continue;
         int books_used = 0;
         for (const auto &market : array_field(raw_game.value("markets", json()))) {
-            if (market.value("name", "") != "2way")
+            if (string_field(market, "name") != "2way")
                 continue;
             for (const auto &book : array_field(market.value("books", json()))) {
                 if (books_used >= 10)
                     break;
-                const auto book_name = book.value("name", "");
+                const auto book_name = string_field(book, "name");
                 if (book_name.empty())
                     continue;
                 bool used = false;
                 for (const auto &outcome : array_field(book.value("outcomes", json()))) {
-                    const auto type = outcome.value("type", "");
+                    const auto type = string_field(outcome, "type");
                     if (type != "home" && type != "away")
                         continue;
                     const double decimal = number(outcome.value("odds", json()), 0);
@@ -2057,6 +2088,18 @@ FeedResponse PublicFeeds::get(const std::string &url, int ttl, int max_stale) {
 json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancelled) {
     cancelled_ = cancelled;
     requests_ = 0;
+    // One malformed feed must never abort the whole refresh (a parser reading
+    // an unexpected null used to escape as a generic "Refresh worker" error
+    // and discard every other source). Parse exceptions are contained per
+    // source and reported on that source's card at the end of the refresh.
+    std::map<std::string, std::string> parse_errors;
+    auto parse_guard = [&parse_errors](const std::string &source_id, auto &&fn) {
+        try {
+            fn();
+        } catch (const std::exception &e) {
+            parse_errors[source_id] = e.what();
+        }
+    };
     json s = empty_snapshot("live");
     s["players"] = previous.value("players", json::object());
     s["teams"] = previous.value("teams", json::object());
@@ -2089,7 +2132,7 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
             espn_contract_ok = true;
         if (espn.fetched_at.empty() || day.fetched_at > espn.fetched_at)
             espn.fetched_at = day.fetched_at;
-        parse_espn_scoreboard(day.data, s, day.fetched_at);
+        parse_guard("espn", [&] { parse_espn_scoreboard(day.data, s, day.fetched_at); });
     }
     if (espn_days_ok) {
         espn.data = json::object(); // At least one day answered; details go in the source card.
@@ -2158,7 +2201,7 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     }
     auto nba = get("https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json", 30, 0);
     if (!nba.data.is_null())
-        parse_nba_scoreboard(nba.data, s, nba.fetched_at);
+        parse_guard("nba-live", [&] { parse_nba_scoreboard(nba.data, s, nba.fetched_at); });
     s["sources"].push_back(
         source("nba-live", "NBA live scoreboard", nba, static_cast<int>(s["games"].size()),
                "Scores, period and game clock. NBA CDN is keyless; availability is not guaranteed."));
@@ -2168,9 +2211,11 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     auto nba_odds = get("https://cdn.nba.com/static/json/liveData/odds/odds_todaysGames.json", 120, 0);
     int nba_odds_count = 0;
     if (!nba_odds.data.is_null()) {
-        const auto before = s["quotes"].size();
-        parse_nba_cdn_odds(nba_odds.data, s, nba_odds.fetched_at);
-        nba_odds_count = static_cast<int>(s["quotes"].size() - before);
+        parse_guard("nba-odds", [&] {
+            const auto before = s["quotes"].size();
+            parse_nba_cdn_odds(nba_odds.data, s, nba_odds.fetched_at);
+            nba_odds_count = static_cast<int>(s["quotes"].size() - before);
+        });
     }
     s["sources"].push_back(source(
         "nba-odds", "NBA CDN sportsbook moneylines", nba_odds, nba_odds_count,
@@ -2186,9 +2231,11 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
         "https://gamma-api.polymarket.com/events?tag_slug=nba&active=true&closed=false&limit=100", 60, 300);
     int polymarket_count = 0;
     if (!polymarket.data.is_null()) {
-        const auto before = s["quotes"].size();
-        parse_polymarket_events(polymarket.data, s, polymarket.fetched_at);
-        polymarket_count = static_cast<int>(s["quotes"].size() - before);
+        parse_guard("polymarket", [&] {
+            const auto before = s["quotes"].size();
+            parse_polymarket_events(polymarket.data, s, polymarket.fetched_at);
+            polymarket_count = static_cast<int>(s["quotes"].size() - before);
+        });
     }
     s["sources"].push_back(
         source("polymarket", "Polymarket NBA game prices", polymarket, polymarket_count,
@@ -2199,9 +2246,11 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
         60, 300);
     int kalshi_count = 0;
     if (!kalshi.data.is_null()) {
-        const auto before = s["quotes"].size();
-        parse_kalshi_markets(kalshi.data, s, kalshi.fetched_at);
-        kalshi_count = static_cast<int>(s["quotes"].size() - before);
+        parse_guard("kalshi", [&] {
+            const auto before = s["quotes"].size();
+            parse_kalshi_markets(kalshi.data, s, kalshi.fetched_at);
+            kalshi_count = static_cast<int>(s["quotes"].size() - before);
+        });
     }
     s["sources"].push_back(source("kalshi", "Kalshi NBA game prices", kalshi, kalshi_count,
                                   "Keyless public exchange market data; midpoint of bid/ask when "
@@ -2209,27 +2258,50 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     int pinnacle_count = 0;
     auto pinnacle_leagues = get("https://guest.api.arcadia.pinnacle.com/0.1/sports/4/leagues", 600, 7200);
     FeedResponse pinnacle_state = pinnacle_leagues;
+    // Name the failing stage on the source card: a bare "HTTP 404" does not
+    // say whether the league list, matchup list or markets request failed.
+    std::string pinnacle_stage = "league list";
     if (pinnacle_leagues.data.is_array()) {
+        pinnacle_stage.clear();
         int leagues_used = 0;
         for (const auto &league : pinnacle_leagues.data) {
-            const auto name = league.value("name", "");
+            const auto name = string_field(league, "name");
             if ((name != "NBA" && name != "NBA Preseason") || leagues_used >= 2)
                 continue;
             ++leagues_used;
             const auto league_id =
                 std::to_string(static_cast<long long>(number(league.value("id", json()), -1)));
-            auto matchups = get(
-                "https://guest.api.arcadia.pinnacle.com/0.1/leagues/" + league_id + "/matchups?brandId=0",
-                120, 600);
-            auto straight = get("https://guest.api.arcadia.pinnacle.com/0.1/leagues/" + league_id +
-                                    "/markets/straight/period/0?brandId=0",
-                                45, 0);
+            const auto league_base = "https://guest.api.arcadia.pinnacle.com/0.1/leagues/" + league_id;
+            auto matchups = get(league_base + "/matchups?brandId=0", 120, 600);
+            // Pinnacle's own site and public integrations read straight
+            // markets at /markets/straight; the /period/0 route this build
+            // requested before now answers 404. Keep the old route as a
+            // fallback so a future route change degrades honestly.
+            auto straight = get(league_base + "/markets/straight?brandId=0", 45, 0);
+            if (straight.data.is_null())
+                straight = get(league_base + "/markets/straight/period/0?brandId=0", 45, 0);
             pinnacle_state = straight;
             if (!matchups.data.is_null() && !straight.data.is_null()) {
-                const auto before = s["quotes"].size();
-                parse_pinnacle_markets(matchups.data, straight.data, s, straight.fetched_at);
-                pinnacle_count += static_cast<int>(s["quotes"].size() - before);
+                pinnacle_stage.clear();
+                parse_guard("pinnacle", [&] {
+                    const auto before = s["quotes"].size();
+                    parse_pinnacle_markets(matchups.data, straight.data, s, straight.fetched_at);
+                    pinnacle_count += static_cast<int>(s["quotes"].size() - before);
+                });
+            } else {
+                pinnacle_stage = matchups.data.is_null() ? "matchup list" : "straight markets";
+                pinnacle_state = matchups.data.is_null() ? matchups : straight;
             }
+        }
+        if (!leagues_used)
+            pinnacle_stage = "league list (no NBA league is currently published)";
+    }
+    if (!pinnacle_count && !pinnacle_stage.empty()) {
+        if (pinnacle_state.data.is_null())
+            pinnacle_state.error = "Pinnacle " + pinnacle_stage + " request failed: " + pinnacle_state.error;
+        else {
+            pinnacle_state.data = nullptr;
+            pinnacle_state.error = "Pinnacle " + pinnacle_stage + "; no moneylines this refresh.";
         }
     }
     s["sources"].push_back(source("pinnacle", "Pinnacle NBA moneylines", pinnacle_state, pinnacle_count,
@@ -2252,7 +2324,7 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
         players = get(player_url(season), 21600, 172800);
     }
     if (!players.data.is_null())
-        parse_player_logs(players.data, s, players.fetched_at);
+        parse_guard("nba-players", [&] { parse_player_logs(players.data, s, players.fetched_at); });
     s["sources"].push_back(source("nba-players", "NBA historical player logs", players,
                                   static_cast<int>(s["players"].size()),
                                   "Recent minutes, P/R/A, 3PM, STL/BLK and shooting detail. Prior season is "
@@ -2268,13 +2340,13 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
         "VsConference=&VsDivision=";
     auto ratings = get(ratings_url, 21600, 172800);
     if (!ratings.data.is_null())
-        parse_team_ratings(ratings.data, s, ratings.fetched_at);
+        parse_guard("nba-teams", [&] { parse_team_ratings(ratings.data, s, ratings.fetched_at); });
     auto teamlogs = get("https://stats.nba.com/stats/leaguegamelog?Counter=0&DateFrom=" + date_from +
                             "&DateTo=&Direction=DESC&LeagueID=00&PlayerOrTeam=T&Season=" + season +
                             "&SeasonType=Regular%20Season&Sorter=DATE",
                         21600, 172800);
     if (!teamlogs.data.is_null())
-        parse_team_logs(teamlogs.data, s, teamlogs.fetched_at);
+        parse_guard("nba-teamlogs", [&] { parse_team_logs(teamlogs.data, s, teamlogs.fetched_at); });
     s["sources"].push_back(
         source("nba-teams", "NBA advanced team environment", ratings, static_cast<int>(s["teams"].size()),
                "Pace, offensive/defensive ratings. Historical team results supply Elo, variance and rest."));
@@ -2297,7 +2369,7 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                              "&SeasonType=Regular%20Season&SeasonYear=",
                          21600, 172800);
     if (!standings.data.is_null())
-        parse_standings(standings.data, s, standings.fetched_at);
+        parse_guard("nba-standings", [&] { parse_standings(standings.data, s, standings.fetched_at); });
     int standings_count = 0;
     for (const auto &item : s["teams"].items())
         if (item.value().contains("standings"))
@@ -2313,7 +2385,8 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                 season + "&SeasonType=Regular%20Season",
             21600, 172800);
     if (!season_stats.data.is_null())
-        parse_player_season_stats(season_stats.data, s, season_stats.fetched_at);
+        parse_guard("nba-season-stats",
+                    [&] { parse_player_season_stats(season_stats.data, s, season_stats.fetched_at); });
     int season_stats_count = 0;
     for (const auto &item : s["players"].items())
         if (item.value().contains("seasonStats"))
@@ -2333,7 +2406,8 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
         "VsConference=&VsDivision=";
     auto four_factors = get(four_factors_url, 21600, 172800);
     if (!four_factors.data.is_null())
-        parse_team_four_factors(four_factors.data, s, four_factors.fetched_at);
+        parse_guard("nba-four-factors",
+                    [&] { parse_team_four_factors(four_factors.data, s, four_factors.fetched_at); });
     int four_factors_count = 0;
     for (const auto &item : s["teams"].items())
         if (item.value().contains("fourFactors"))
@@ -2364,7 +2438,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     };
     auto official_schedule = get("https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json", 3600, 21600);
     if (!official_schedule.data.is_null())
-        parse_official_schedule(official_schedule.data, s, official_schedule.fetched_at);
+        parse_guard("nba-official-schedule", [&] {
+            parse_official_schedule(official_schedule.data, s, official_schedule.fetched_at);
+        });
     const int schedule_count =
         s.contains("leagueContext") && s["leagueContext"].contains("schedule")
             ? static_cast<int>(number(s["leagueContext"]["schedule"].value("games", json(0))))
@@ -2379,7 +2455,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     auto daily_lineups = get("https://stats.nba.com/js/data/leaders/00_daily_lineups_" + lineup_token + ".json",
                              300, 0);
     if (!daily_lineups.data.is_null())
-        parse_daily_lineups(daily_lineups.data, s, daily_lineups.fetched_at, lineup_token);
+        parse_guard("nba-daily-lineups", [&] {
+            parse_daily_lineups(daily_lineups.data, s, daily_lineups.fetched_at, lineup_token);
+        });
     const int daily_lineup_count =
         s.contains("leagueContext") && s["leagueContext"].contains("dailyLineups")
             ? static_cast<int>(number(s["leagueContext"]["dailyLineups"].value("players", json(0))))
@@ -2394,7 +2472,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     auto player_movement = get("https://stats.nba.com/js/data/playermovement/NBA_Player_Movement.json", 21600,
                                172800);
     if (!player_movement.data.is_null())
-        parse_player_movement(player_movement.data, s, player_movement.fetched_at, season);
+        parse_guard("nba-transactions", [&] {
+            parse_player_movement(player_movement.data, s, player_movement.fetched_at, season);
+        });
     s["sources"].push_back(source("nba-transactions", "NBA player transactions (NBA_Player_Movement)",
                                   player_movement, static_cast<int>(s["transactions"].size()),
                                   "Static archive behind the NBA transactions page: signings, waivers, "
@@ -2406,7 +2486,8 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                 season + "&TeamID=0&Weight=",
                             21600, 172800);
     if (!player_index.data.is_null())
-        parse_player_index(player_index.data, s, player_index.fetched_at);
+        parse_guard("nba-player-index",
+                    [&] { parse_player_index(player_index.data, s, player_index.fetched_at); });
     s["sources"].push_back(source("nba-player-index", "NBA player index (nba_api PlayerIndex)", player_index,
                                   player_field_count("playerIndex"),
                                   "League roster crosswalk: team, jersey, position, height/weight, college, "
@@ -2417,7 +2498,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                   "&SeasonType=Regular%20Season",
                               21600, 172800);
     if (!team_estimated.data.is_null())
-        parse_team_estimated_metrics(team_estimated.data, s, team_estimated.fetched_at);
+        parse_guard("nba-team-estimated", [&] {
+            parse_team_estimated_metrics(team_estimated.data, s, team_estimated.fetched_at);
+        });
     s["sources"].push_back(source("nba-team-estimated", "NBA team estimated metrics (TeamEstimatedMetrics)",
                                   team_estimated, team_field_count("estimatedMetrics"),
                                   "Estimated offensive/defensive/net rating, pace, assist/rebound/turnover "
@@ -2426,7 +2509,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                     "&SeasonType=Regular%20Season",
                                 21600, 172800);
     if (!player_estimated.data.is_null())
-        parse_player_estimated_metrics(player_estimated.data, s, player_estimated.fetched_at);
+        parse_guard("nba-player-estimated", [&] {
+            parse_player_estimated_metrics(player_estimated.data, s, player_estimated.fetched_at);
+        });
     s["sources"].push_back(source("nba-player-estimated", "NBA player estimated metrics (PlayerEstimatedMetrics)",
                                   player_estimated, player_field_count("estimatedMetrics"),
                                   "Estimated offensive/defensive/net rating, pace, assist/rebound/turnover/"
@@ -2438,7 +2523,8 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
         season + "&SeasonType=Regular%20Season";
     auto team_clutch = get("https://stats.nba.com/stats/leaguedashteamclutch" + clutch_query, 21600, 172800);
     if (!team_clutch.data.is_null())
-        parse_team_clutch(team_clutch.data, s, team_clutch.fetched_at);
+        parse_guard("nba-team-clutch",
+                    [&] { parse_team_clutch(team_clutch.data, s, team_clutch.fetched_at); });
     s["sources"].push_back(source("nba-team-clutch", "NBA team clutch stats (LeagueDashTeamClutch)", team_clutch,
                                   team_field_count("clutch"),
                                   "Clutch totals (last 5 minutes, score within 5): record, shooting, "
@@ -2446,7 +2532,8 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                   "Context only."));
     auto player_clutch = get("https://stats.nba.com/stats/leaguedashplayerclutch" + clutch_query, 21600, 172800);
     if (!player_clutch.data.is_null())
-        parse_player_clutch(player_clutch.data, s, player_clutch.fetched_at);
+        parse_guard("nba-player-clutch",
+                    [&] { parse_player_clutch(player_clutch.data, s, player_clutch.fetched_at); });
     s["sources"].push_back(source("nba-player-clutch", "NBA player clutch stats (LeagueDashPlayerClutch)",
                                   player_clutch, player_field_count("clutch"),
                                   "Clutch totals (last 5 minutes, score within 5) with fantasy points and "
@@ -2455,7 +2542,8 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                season + "&SeasonType=Regular%20Season",
                            21600, 172800);
     if (!team_hustle.data.is_null())
-        parse_team_hustle(team_hustle.data, s, team_hustle.fetched_at);
+        parse_guard("nba-team-hustle",
+                    [&] { parse_team_hustle(team_hustle.data, s, team_hustle.fetched_at); });
     s["sources"].push_back(source("nba-team-hustle", "NBA team hustle stats (LeagueHustleStatsTeam)", team_hustle,
                                   team_field_count("hustle"),
                                   "Season hustle totals: contested shots, deflections, charges drawn, screen "
@@ -2464,7 +2552,8 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                  season + "&SeasonType=Regular%20Season",
                              21600, 172800);
     if (!player_hustle.data.is_null())
-        parse_player_hustle(player_hustle.data, s, player_hustle.fetched_at);
+        parse_guard("nba-player-hustle",
+                    [&] { parse_player_hustle(player_hustle.data, s, player_hustle.fetched_at); });
     s["sources"].push_back(source("nba-player-hustle", "NBA player hustle stats (LeagueHustleStatsPlayer)",
                                   player_hustle, player_field_count("hustle"),
                                   "Season hustle totals: contested shots, deflections, charges drawn, screen "
@@ -2475,7 +2564,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                 season + "&SeasonType=Regular%20Season",
             21600, 172800);
     if (!team_tracking_defense.data.is_null())
-        parse_team_tracking_defense(team_tracking_defense.data, s, team_tracking_defense.fetched_at);
+        parse_guard("nba-team-tracking-defense", [&] {
+            parse_team_tracking_defense(team_tracking_defense.data, s, team_tracking_defense.fetched_at);
+        });
     s["sources"].push_back(source("nba-team-tracking-defense", "NBA team tracking defense (LeagueDashPtTeamDefend)",
                                   team_tracking_defense, team_field_count("trackingDefense"),
                                   "Defended field-goal % versus the shooters' normal % (PCT_PLUSMINUS "
@@ -2484,7 +2575,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                   season + "&SeasonType=Regular%20Season",
                               21600, 172800);
     if (!opponent_shots.data.is_null())
-        parse_team_opponent_shots(opponent_shots.data, s, opponent_shots.fetched_at);
+        parse_guard("nba-opponent-shots", [&] {
+            parse_team_opponent_shots(opponent_shots.data, s, opponent_shots.fetched_at);
+        });
     s["sources"].push_back(source("nba-opponent-shots", "NBA opponent shot profile (LeagueDashOppPtShot)",
                                   opponent_shots, team_field_count("opponentShotProfile"),
                                   "The tracking shot profile opponents record against each team (frequency, "
@@ -2494,7 +2587,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                 "&SeasonType=Regular%20Season",
             21600, 172800);
     if (!player_tracking_shots.data.is_null())
-        parse_player_tracking_shots(player_tracking_shots.data, s, player_tracking_shots.fetched_at);
+        parse_guard("nba-player-tracking-shots", [&] {
+            parse_player_tracking_shots(player_tracking_shots.data, s, player_tracking_shots.fetched_at);
+        });
     s["sources"].push_back(source("nba-player-tracking-shots", "NBA player tracking shots (LeagueDashPlayerPtShot)",
                                   player_tracking_shots, player_field_count("trackingShooting"),
                                   "Tracking shooting profile: attempt frequency, FG%/eFG% and 2PT/3PT "
@@ -2505,7 +2600,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                 season + "&SeasonType=Regular%20Season",
             21600, 172800);
     if (!player_tracking_defense.data.is_null())
-        parse_player_tracking_defense(player_tracking_defense.data, s, player_tracking_defense.fetched_at);
+        parse_guard("nba-player-tracking-defense", [&] {
+            parse_player_tracking_defense(player_tracking_defense.data, s, player_tracking_defense.fetched_at);
+        });
     s["sources"].push_back(source("nba-player-tracking-defense", "NBA player tracking defense (LeagueDashPtDefend)",
                                   player_tracking_defense, player_field_count("trackingDefense"),
                                   "Defended field-goal % versus the shooters' normal % (PCT_PLUSMINUS "
@@ -2515,7 +2612,8 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                 season + "&SeasonType=Regular%20Season",
                             21600, 172800);
     if (!team_lineups.data.is_null())
-        parse_team_top_lineups(team_lineups.data, s, team_lineups.fetched_at);
+        parse_guard("nba-team-lineups",
+                    [&] { parse_team_top_lineups(team_lineups.data, s, team_lineups.fetched_at); });
     s["sources"].push_back(source("nba-team-lineups", "NBA five-man lineups (LeagueDashLineups)", team_lineups,
                                   team_field_count("topLineup"),
                                   "Each team's most-used five-man unit (minutes, record, shooting, points "
@@ -2543,10 +2641,11 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
             auto summary = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=" +
                                    game.value("espnId", ""),
                                30, 0);
-            if (!summary.data.is_null()) {
-                parse_espn_summary(summary.data, s, game, summary.fetched_at);
-                ++summaries;
-            }
+            if (!summary.data.is_null())
+                parse_guard("boxscores", [&] {
+                    parse_espn_summary(summary.data, s, game, summary.fetched_at);
+                    ++summaries;
+                });
         }
     s["sources"].push_back({{"id", "boxscores"},
                             {"label", "ESPN live player box scores"},
@@ -2571,10 +2670,12 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                               3600, 7200);
             if (!roster.cached)
                 ++roster_network;
-            if (!roster.data.is_null()) {
-                parse_espn_roster(roster.data, s, team, roster.fetched_at);
-                ++roster_count;
-            } else
+            if (!roster.data.is_null())
+                parse_guard("rosters", [&] {
+                    parse_espn_roster(roster.data, s, team, roster.fetched_at);
+                    ++roster_count;
+                });
+            else
                 ++roster_failures;
         }
     s["sources"].push_back(
@@ -2601,6 +2702,15 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
             it = s["players"].erase(it);
         else
             ++it;
+    }
+    for (auto &card : s["sources"]) {
+        const auto failed = parse_errors.find(card.value("id", ""));
+        if (failed == parse_errors.end())
+            continue;
+        card["state"] = "unavailable";
+        card["count"] = 0;
+        card["message"] = "The source responded, but its payload could not be parsed (" + failed->second +
+                          "). It contributed no data this refresh; other sources were unaffected.";
     }
     s["generatedAt"] = now_iso();
     return s;
