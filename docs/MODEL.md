@@ -96,8 +96,33 @@ No EV for absent, suspended, expired or future-dated prices; no probability for 
 
 All data timestamps are UTC. The browser formats starts in the viewer's timezone. Imported odds timestamps are retained across refresh/restart, not overwritten by retrieval time. ESPN moneylines often have no reliable book-last-update time: retrieval age is shown and a verification warning is mandatory.
 
-## Backtesting CLI
+## Backtesting and market comparison CLI
 
-`--backtest` scores **supplied predictions**, not automatically reconstructed historical feature sets, not training, and not proof of authentic timestamps. `predictedAt` must precede `startsAt`. Optional `pushProbability` affects EV selection. Brier/log loss score resolved outcomes conditional on no push; actual pushes refund flat unit stakes and are excluded from binary scores.
+`--backtest` scores **supplied predictions**; it does not reconstruct historical features, train the estimator, or independently prove that timestamps/data are authentic. `predictedAt` must precede `startsAt`. Optional `pushProbability` affects EV selection. Brier/log loss score outcomes conditional on no push; actual pushes are refunded in flat-stake ROI and excluded from binary scoring.
 
-A credible next step requires a timestamped historical feature/obtainable-price corpus, walk-forward evaluation, held-out calibration, realistic settlement/limits/latency, all picks rather than cherry-picked winners, closing-line comparisons and adequate independent samples. Do that before using estimates financially.
+For a direct model-vs-market comparison, include a closing market forecast on **every** observation, plus a unique `gameId`, `closingAt` and (recommended) a `market` label. `closingAt` must be at or after `predictedAt` and before `startsAt`. Supply exactly one of:
+
+- `closingNoVigProbability`: the closing market's already de-vigged probability for the selected outcome, conditional on no push; or
+- `closingOddsPercent` and `closingOppositeOddsPercent`: the two closing implied percentages, from the same book/source, exact market/line and timestamp. The scorer computes `selected / (selected + opposite)`.
+
+Example row fields (the sample is fictional):
+
+```json
+{
+  "gameId": "historical-game-id",
+  "market": "points",
+  "probability": 0.56,
+  "pushProbability": 0.02,
+  "oddsPercent": 52.38,
+  "predictedAt": "2026-10-01T20:00:00Z",
+  "closingAt": "2026-10-01T23:55:00Z",
+  "closingOddsPercent": 54.1,
+  "closingOppositeOddsPercent": 47.8,
+  "startsAt": "2026-10-02T00:00:00Z",
+  "result": "win"
+}
+```
+
+The report compares paired, push-conditional Brier and log loss against the closing market overall and by market. Negative model-minus-market loss favors the model; positive skill score means the model's loss was proportionally lower. It also gives an approximate 95% normal interval clustered by `gameId` only when at least 30 resolved game clusters exist; smaller samples get no interval. That interval does not correct for repeated-team/time dependence, model selection, bad source data or leakage. All-or-none benchmark fields deliberately reject partial market samples. Without benchmark fields, the report explicitly says `not_provided`; ordinary ROI is not evidence that the model beat the market.
+
+A credible performance claim still requires a timestamped historical feature/obtainable-price corpus, strictly walk-forward predictions, held-out calibration, realistic settlement/limits/latency, the complete predeclared set of picks (not winners cherry-picked after the fact), closing-line comparisons and adequate independent samples. No such real benchmark corpus or result is included here.

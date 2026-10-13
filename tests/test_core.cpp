@@ -388,8 +388,108 @@ int main() {
         near(number(score["brier"]), .16);
         check(score["selectedBets"] == 2 && score["pushes"] == 1, "Backtest selection");
         near(number(score["roiPercent"]), 50);
+        check(score["marketComparisonStatus"] == "not_provided" && score["marketComparison"].is_null(),
+              "Unbenchmarked report must not imply market outperformance");
         rows["observations"][0]["predictedAt"] = "2026-10-01T02:00:00Z";
         throws([&] { score_backtest(rows); });
+    });
+    test("Backtest scores all predictions against closing no-vig market", [] {
+        auto observation = [](const std::string &game, double model, double market, const std::string &result,
+                              double push = 0) {
+            return json{{"gameId", game},
+                        {"market", "points"},
+                        {"probability", model},
+                        {"pushProbability", push},
+                        {"oddsPercent", 50},
+                        {"predictedAt", "2026-10-01T00:00:00Z"},
+                        {"closingAt", "2026-10-01T01:30:00Z"},
+                        {"closingNoVigProbability", market},
+                        {"startsAt", "2026-10-01T02:00:00Z"},
+                        {"result", result}};
+        };
+        json doc = {{"observations", json::array({observation("g1", .8, .7, "win"),
+                                                   observation("g2", .4, .6, "loss"),
+                                                   observation("g3", .45, .5, "push", .1)})}};
+        auto report = score_backtest(doc);
+        const auto comparison = report["marketComparison"]["overall"];
+        check(report["marketComparisonStatus"] == "scored", "Market comparison missing");
+        check(report["marketComparison"]["matchedObservations"] == 3, "Matched sample size");
+        check(comparison["resolved"] == 2 && comparison["pushesExcluded"] == 1, "Push scoring");
+        near(number(comparison["modelBrier"]), .1);
+        near(number(comparison["closingMarketBrier"]), .225);
+        near(number(comparison["brierDifferenceModelMinusMarket"]), -.125);
+        near(number(comparison["brierSkillScore"]), .125 / .225);
+        check(comparison["brierDifference95CI"].is_null() &&
+                  comparison["brierIntervalResult"] == "not_estimable_fewer_than_30_resolved_game_clusters",
+              "Small samples must not claim an uncertainty interval");
+        check(comparison["minimumGameClustersForInterval"] == 30, "Minimum cluster guard missing");
+        check(report["marketComparison"]["byMarket"]["points"]["resolved"] == 2,
+              "Per-market score missing");
+    });
+    test("Market score uncertainty requires 30 resolved game clusters", [] {
+        json observations = json::array();
+        for (int i = 0; i < 30; ++i) {
+            const bool win = i % 2 == 0;
+            observations.push_back({{"gameId", "game-" + std::to_string(i)},
+                                    {"market", "points"},
+                                    {"probability", win ? .55 : .45},
+                                    {"oddsPercent", 50},
+                                    {"predictedAt", "2026-10-01T00:00:00Z"},
+                                    {"closingAt", "2026-10-01T01:30:00Z"},
+                                    {"closingNoVigProbability", .5},
+                                    {"startsAt", "2026-10-01T02:00:00Z"},
+                                    {"result", win ? "win" : "loss"}});
+        }
+        const auto report = score_backtest({{"observations", observations}});
+        const auto comparison = report["marketComparison"]["overall"];
+        check(comparison["gameClusters"] == 30 && !comparison["brierDifference95CI"].is_null(),
+              "Thirty resolved games should enable the approximate interval");
+    });
+    test("Backtest derives no-vig closing probability from both quoted sides", [] {
+        json row = {{"gameId", "g1"},
+                    {"market", "points"},
+                    {"probability", .6},
+                    {"oddsPercent", 50},
+                    {"predictedAt", "2026-10-01T00:00:00Z"},
+                    {"closingAt", "2026-10-01T01:30:00Z"},
+                    {"closingOddsPercent", 55},
+                    {"closingOppositeOddsPercent", 50},
+                    {"startsAt", "2026-10-01T02:00:00Z"},
+                    {"result", "win"}};
+        auto report = score_backtest({{"observations", json::array({row})}});
+        const double fair = 55.0 / 105.0;
+        near(number(report["marketComparison"]["overall"]["closingMarketBrier"]),
+             (1 - fair) * (1 - fair));
+        check(report["marketComparison"]["overall"]["brierDifference95CI"].is_null(),
+              "A single game cannot estimate between-game uncertainty");
+    });
+    test("Market benchmark rejects partial samples, incomplete pairs and closing-time leakage", [] {
+        json first = {{"gameId", "g1"},
+                      {"probability", .6},
+                      {"oddsPercent", 50},
+                      {"predictedAt", "2026-10-01T00:00:00Z"},
+                      {"closingAt", "2026-10-01T01:30:00Z"},
+                      {"closingNoVigProbability", .55},
+                      {"startsAt", "2026-10-01T02:00:00Z"},
+                      {"result", "win"}};
+        json second = first;
+        second["gameId"] = "g2";
+        json partial = {{"observations", json::array({first, second})}};
+        partial["observations"][1].erase("closingNoVigProbability");
+        throws([&] { score_backtest(partial); });
+
+        auto late = first;
+        late["closingAt"] = "2026-10-01T02:00:00Z";
+        throws([&] { score_backtest({{"observations", json::array({late})}}); });
+
+        auto incomplete_pair = first;
+        incomplete_pair.erase("closingNoVigProbability");
+        incomplete_pair["closingOddsPercent"] = 55;
+        throws([&] { score_backtest({{"observations", json::array({incomplete_pair})}}); });
+
+        auto no_game = first;
+        no_game.erase("gameId");
+        throws([&] { score_backtest({{"observations", json::array({no_game})}}); });
     });
     test("NBA player log parser preserves roster crosswalk and maps raw stats", [] {
         auto s = empty_snapshot("live");

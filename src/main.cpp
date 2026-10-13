@@ -45,7 +45,7 @@ void help() {
               << "  --data-dir PATH                      Override local storage\n"
               << "  --offline                            Disable public requests; use local inputs\n"
               << "  --history-dir PATH                   Local historical feature bundle directory\n"
-              << "  --backtest PATH                      Score historical prediction JSON\n"
+              << "  --backtest PATH                      Score predictions; compare with closing market if supplied\n"
               << "  --version / --help                   Print version / usage\n\n"
               << "Research only. The model is experimental and uncalibrated. No guaranteed profits.\n";
 }

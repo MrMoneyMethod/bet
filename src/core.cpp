@@ -1720,6 +1720,49 @@ std::string csv_template(const json &snapshot) {
 json score_backtest(const json &doc) {
     if (!doc.contains("observations") || !doc["observations"].is_array() || doc["observations"].empty())
         throw std::invalid_argument("Backtest requires nonempty observations");
+
+    // Require a complete matched sample whenever the caller asks for a market comparison.
+    // This avoids silently comparing on a cherry-picked subset.
+    bool any_market_comparison = false, all_market_comparisons = true;
+    for (const auto &row : doc["observations"]) {
+        if (!row.is_object())
+            throw std::invalid_argument("Every backtest observation must be an object");
+        const bool direct = row.contains("closingNoVigProbability");
+        const bool has_closing_side = row.contains("closingOddsPercent");
+        const bool has_closing_opposite = row.contains("closingOppositeOddsPercent");
+        const bool pair = has_closing_side || has_closing_opposite;
+        if (direct && pair)
+            throw std::invalid_argument(
+                "Use closingNoVigProbability or a closing odds pair, not both");
+        if (pair && !(has_closing_side && has_closing_opposite))
+            throw std::invalid_argument("Closing market comparison requires both sides of the odds pair");
+        const bool matched = direct || pair;
+        if (row.contains("closingAt") && !matched)
+            throw std::invalid_argument("closingAt requires closing market probabilities or odds");
+        any_market_comparison = any_market_comparison || matched;
+        all_market_comparisons = all_market_comparisons && matched;
+    }
+    if (any_market_comparison && !all_market_comparisons)
+        throw std::invalid_argument(
+            "Market comparison must be supplied for every observation; partial samples can be cherry-picked");
+
+    struct ClusterLoss {
+        int observations = 0;
+        double brierDifference = 0;
+        double logLossDifference = 0;
+    };
+    struct ComparisonScores {
+        int resolved = 0;
+        int pushesExcluded = 0;
+        double modelBrier = 0;
+        double marketBrier = 0;
+        double modelLogLoss = 0;
+        double marketLogLoss = 0;
+        std::map<std::string, ClusterLoss> clusters;
+    };
+    ComparisonScores overall_comparison;
+    std::map<std::string, ComparisonScores> comparisons_by_market;
+
     double brier = 0, logloss = 0, profit = 0, staked = 0;
     int resolved = 0, selected = 0, wins = 0, pushes = 0;
     for (const auto &row : doc["observations"]) {
@@ -1741,13 +1784,64 @@ json score_backtest(const json &doc) {
         if (push < 0 || p + push >= 1)
             throw std::invalid_argument("Backtest win + push probability must be below 1");
 
+        double closing_market_probability = 0;
+        std::string game_id, market_name = "unclassified";
+        if (any_market_comparison) {
+            require_string(row, "closingAt", 20);
+            const auto closing = parse_time(row["closingAt"].get<std::string>());
+            if (!closing || closing < predicted || closing >= start)
+                throw std::invalid_argument(
+                    "Leakage guard: closingAt must be between predictedAt and game start");
+            require_identifier(row, "gameId");
+            game_id = row["gameId"].get<std::string>();
+            if (row.contains("market")) {
+                require_string(row, "market", 80);
+                market_name = row["market"].get<std::string>();
+            }
+            if (row.contains("closingNoVigProbability")) {
+                require_number(row, "closingNoVigProbability", 0.000001, 0.999999);
+                closing_market_probability = number(row["closingNoVigProbability"]);
+            } else {
+                require_number(row, "closingOddsPercent", 0.01, 99.99);
+                require_number(row, "closingOppositeOddsPercent", 0.01, 99.99);
+                const double selected_implied = number(row["closingOddsPercent"]) / 100.0;
+                const double opposite_implied = number(row["closingOppositeOddsPercent"]) / 100.0;
+                closing_market_probability = selected_implied / (selected_implied + opposite_implied);
+            }
+        }
+
         auto d = quote_decimal_odds(price);
         double resolved_p = p / (1 - push);
         if (outcome != "push") {
             double y = outcome == "win" ? 1 : 0;
-            brier += (resolved_p - y) * (resolved_p - y);
-            logloss -= y * std::log(resolved_p) + (1 - y) * std::log(1 - resolved_p);
+            const double model_brier = (resolved_p - y) * (resolved_p - y);
+            const double model_logloss = -y * std::log(resolved_p) - (1 - y) * std::log(1 - resolved_p);
+            brier += model_brier;
+            logloss += model_logloss;
             ++resolved;
+
+            if (any_market_comparison) {
+                const double market_brier =
+                    (closing_market_probability - y) * (closing_market_probability - y);
+                const double market_logloss = -y * std::log(closing_market_probability) -
+                                              (1 - y) * std::log(1 - closing_market_probability);
+                auto record = [&](ComparisonScores &scores) {
+                    scores.modelBrier += model_brier;
+                    scores.marketBrier += market_brier;
+                    scores.modelLogLoss += model_logloss;
+                    scores.marketLogLoss += market_logloss;
+                    ++scores.resolved;
+                    auto &cluster = scores.clusters[game_id];
+                    ++cluster.observations;
+                    cluster.brierDifference += model_brier - market_brier;
+                    cluster.logLossDifference += model_logloss - market_logloss;
+                };
+                record(overall_comparison);
+                record(comparisons_by_market[market_name]);
+            }
+        } else if (any_market_comparison) {
+            ++overall_comparison.pushesExcluded;
+            ++comparisons_by_market[market_name].pushesExcluded;
         }
         if (expected_value(p, push, price) > doc.value("minEv", 0.0)) {
             ++selected;
@@ -1761,19 +1855,109 @@ json score_backtest(const json &doc) {
                 ++pushes;
         }
     }
-    return {
-        {"synthetic", doc.value("synthetic", false)},
-        {"observations", doc["observations"].size()},
-        {"resolved", resolved},
-        {"brier", resolved ? json(brier / resolved) : json(nullptr)},
-        {"logLoss", resolved ? json(logloss / resolved) : json(nullptr)},
-        {"selectedBets", selected},
-        {"wins", wins},
-        {"pushes", pushes},
-        {"profitUnits", profit},
-        {"roiPercent", staked ? json(profit / staked * 100) : json(nullptr)},
-        {"note",
-         "Scores supplied historical predictions, not a trained model. Timestamp guard cannot independently "
-         "verify provenance. Use chronological held-out data and realistic obtainable prices."}};
+
+    auto comparison_report = [](const ComparisonScores &scores) {
+        const auto scored = scores.resolved;
+        const double model_brier = scored ? scores.modelBrier / scored : 0;
+        const double market_brier = scored ? scores.marketBrier / scored : 0;
+        const double model_logloss = scored ? scores.modelLogLoss / scored : 0;
+        const double market_logloss = scored ? scores.marketLogLoss / scored : 0;
+        const double brier_difference = model_brier - market_brier;
+        const double logloss_difference = model_logloss - market_logloss;
+        constexpr size_t MIN_CLUSTERS_FOR_INTERVAL = 30;
+        auto interval = [&](bool use_brier, double difference) -> json {
+            if (scored == 0 || scores.clusters.size() < MIN_CLUSTERS_FOR_INTERVAL)
+                return nullptr;
+            double squared_cluster_residuals = 0;
+            for (const auto &entry : scores.clusters) {
+                const double cluster_difference = use_brier ? entry.second.brierDifference
+                                                            : entry.second.logLossDifference;
+                const double residual = cluster_difference - entry.second.observations * difference;
+                squared_cluster_residuals += residual * residual;
+            }
+            const double clusters = static_cast<double>(scores.clusters.size());
+            const double standard_error = std::sqrt(
+                (clusters / (clusters - 1.0)) * squared_cluster_residuals / (scored * scored));
+            return {{"lower", difference - 1.96 * standard_error},
+                    {"upper", difference + 1.96 * standard_error},
+                    {"standardError", standard_error},
+                    {"method", "approximate normal interval clustered by gameId"}};
+        };
+        const auto brier_interval = interval(true, brier_difference);
+        const auto logloss_interval = interval(false, logloss_difference);
+        auto observed_result = [&](double difference) {
+            if (!scored)
+                return std::string("unscorable_all_pushes");
+            if (std::abs(difference) < 1e-12)
+                return std::string("tie_on_observed_sample");
+            return difference < 0 ? std::string("model_lower_loss_on_observed_sample")
+                                  : std::string("closing_market_lower_loss_on_observed_sample");
+        };
+        auto interval_result = [](const json &ci) {
+            if (ci.is_null())
+                return std::string("not_estimable_fewer_than_30_resolved_game_clusters");
+            if (number(ci["upper"]) < 0)
+                return std::string("model_lower_loss_in_approximate_interval");
+            if (number(ci["lower"]) > 0)
+                return std::string("closing_market_lower_loss_in_approximate_interval");
+            return std::string("inconclusive_approximate_interval");
+        };
+        return json{{"resolved", scored},
+                    {"pushesExcluded", scores.pushesExcluded},
+                    {"gameClusters", scores.clusters.size()},
+                    {"minimumGameClustersForInterval", MIN_CLUSTERS_FOR_INTERVAL},
+                    {"modelBrier", scored ? json(model_brier) : json(nullptr)},
+                    {"closingMarketBrier", scored ? json(market_brier) : json(nullptr)},
+                    {"brierDifferenceModelMinusMarket", scored ? json(brier_difference) : json(nullptr)},
+                    {"brierSkillScore", scored && market_brier > 0
+                                             ? json((market_brier - model_brier) / market_brier)
+                                             : json(nullptr)},
+                    {"brierObservedResult", observed_result(brier_difference)},
+                    {"brierDifference95CI", brier_interval},
+                    {"brierIntervalResult", interval_result(brier_interval)},
+                    {"modelLogLoss", scored ? json(model_logloss) : json(nullptr)},
+                    {"closingMarketLogLoss", scored ? json(market_logloss) : json(nullptr)},
+                    {"logLossDifferenceModelMinusMarket", scored ? json(logloss_difference) : json(nullptr)},
+                    {"logLossSkillScore", scored && market_logloss > 0
+                                              ? json((market_logloss - model_logloss) / market_logloss)
+                                              : json(nullptr)},
+                    {"logLossObservedResult", observed_result(logloss_difference)},
+                    {"logLossDifference95CI", logloss_interval},
+                    {"logLossIntervalResult", interval_result(logloss_interval)}};
+    };
+
+    json market_comparison = nullptr;
+    if (any_market_comparison) {
+        json by_market = json::object();
+        for (const auto &entry : comparisons_by_market)
+            by_market[entry.first] = comparison_report(entry.second);
+        market_comparison = {{"basis", "Paired proper scores against the closing no-vig market probability."},
+                             {"matchedObservations", doc["observations"].size()},
+                             {"allObservationsMatched", true},
+                             {"overall", comparison_report(overall_comparison)},
+                             {"byMarket", by_market},
+                             {"note",
+                              "Descriptive out-of-sample comparison only. A lower score is better; negative "
+                              "model-minus-market differences favor the model. The game-clustered normal "
+                              "interval is approximate and is not proof of independent observations, no data "
+                              "leakage, or future profitability. Closing prices and results must be authentic."}};
+    }
+    return {{"synthetic", doc.value("synthetic", false)},
+            {"observations", doc["observations"].size()},
+            {"resolved", resolved},
+            {"brier", resolved ? json(brier / resolved) : json(nullptr)},
+            {"logLoss", resolved ? json(logloss / resolved) : json(nullptr)},
+            {"selectedBets", selected},
+            {"wins", wins},
+            {"pushes", pushes},
+            {"profitUnits", profit},
+            {"roiPercent", staked ? json(profit / staked * 100) : json(nullptr)},
+            {"marketComparisonStatus", any_market_comparison ? "scored" : "not_provided"},
+            {"marketComparison", market_comparison},
+            {"note",
+             "Scores supplied historical predictions, not a trained model. Timestamp checks cannot independently "
+             "verify data provenance. Use chronological held-out games, obtainable prices, complete matched "
+             "closing-market probabilities and enough independent game clusters; no metric alone proves "
+             "a future edge."}};
 }
 } // namespace edgecourt

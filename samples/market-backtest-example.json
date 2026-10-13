@@ -1,0 +1,59 @@
+{
+  "synthetic": true,
+  "description": "Fictional predictions, closing prices, and results used only to demonstrate paired model-versus-market scoring. This is not a real backtest or evidence of market outperformance.",
+  "minEv": 0,
+  "observations": [
+    {
+      "gameId": "fictional-game-1",
+      "market": "moneyline",
+      "probability": 0.51,
+      "pushProbability": 0,
+      "oddsPercent": 52.38,
+      "predictedAt": "2026-10-01T20:00:00Z",
+      "closingAt": "2026-10-01T22:59:00Z",
+      "closingOddsPercent": 54.0,
+      "closingOppositeOddsPercent": 48.0,
+      "startsAt": "2026-10-01T23:00:00Z",
+      "result": "win"
+    },
+    {
+      "gameId": "fictional-game-2",
+      "market": "moneyline",
+      "probability": 0.49,
+      "pushProbability": 0,
+      "oddsPercent": 48.0,
+      "predictedAt": "2026-10-03T20:00:00Z",
+      "closingAt": "2026-10-03T22:59:00Z",
+      "closingOddsPercent": 51.0,
+      "closingOppositeOddsPercent": 51.0,
+      "startsAt": "2026-10-03T23:00:00Z",
+      "result": "loss"
+    },
+    {
+      "gameId": "fictional-game-3",
+      "market": "points",
+      "probability": 0.55,
+      "pushProbability": 0.05,
+      "oddsPercent": 50.0,
+      "predictedAt": "2026-10-05T20:00:00Z",
+      "closingAt": "2026-10-05T22:59:00Z",
+      "closingOddsPercent": 52.0,
+      "closingOppositeOddsPercent": 50.0,
+      "startsAt": "2026-10-05T23:00:00Z",
+      "result": "push"
+    },
+    {
+      "gameId": "fictional-game-4",
+      "market": "points",
+      "probability": 0.515,
+      "pushProbability": 0,
+      "oddsPercent": 50.0,
+      "predictedAt": "2026-10-07T20:00:00Z",
+      "closingAt": "2026-10-07T22:59:00Z",
+      "closingOddsPercent": 53.0,
+      "closingOppositeOddsPercent": 49.0,
+      "startsAt": "2026-10-07T23:00:00Z",
+      "result": "win"
+    }
+  ]
+}
