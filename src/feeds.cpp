@@ -1,5 +1,6 @@
 #include "feeds.hpp"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -28,7 +29,10 @@ namespace {
 constexpr size_t MAX_RESPONSE = 16 * 1024 * 1024;
 // Hard per-refresh network budget shared by every public source. Schedule and
 // moneyline fetches run first so stats/roster enrichment cannot starve them.
-constexpr int MAX_REQUESTS_PER_REFRESH = 36;
+// The budget also covers the league-wide official datasets below; they are
+// one request each and season datasets cache for 6 hours, so the budget is
+// only approached on a cold cache.
+constexpr int MAX_REQUESTS_PER_REFRESH = 64;
 long long now_seconds() {
     return parse_time(now_iso());
 }
@@ -1147,6 +1151,666 @@ void parse_team_four_factors(const json &doc, json &s, const std::string &fetche
                             {"asOf", fetched}};
     }
 }
+namespace {
+// Lower-case helper for the official lineup/transaction parsers below.
+std::string lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+std::string titleize_slug(const std::string &slug) {
+    std::string out;
+    bool capital = true;
+    for (char c : slug) {
+        if (c == '-' || c == '_') {
+            if (!out.empty() && out.back() != ' ')
+                out += ' ';
+            capital = true;
+        } else if (capital) {
+            out += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            capital = false;
+        } else
+            out += c;
+    }
+    while (!out.empty() && out.back() == ' ')
+        out.pop_back();
+    return out;
+}
+std::string abbr_from_slug(const std::string &slug) {
+    static const std::map<std::string, std::string> slugs = {
+        {"hawks", "ATL"},          {"celtics", "BOS"},       {"nets", "BKN"},
+        {"hornets", "CHA"},        {"bulls", "CHI"},         {"cavaliers", "CLE"},
+        {"mavericks", "DAL"},      {"nuggets", "DEN"},       {"pistons", "DET"},
+        {"warriors", "GSW"},       {"rockets", "HOU"},       {"pacers", "IND"},
+        {"clippers", "LAC"},       {"lakers", "LAL"},        {"grizzlies", "MEM"},
+        {"heat", "MIA"},           {"bucks", "MIL"},         {"timberwolves", "MIN"},
+        {"pelicans", "NOP"},       {"knicks", "NYK"},        {"thunder", "OKC"},
+        {"magic", "ORL"},          {"76ers", "PHI"},         {"suns", "PHX"},
+        {"trail-blazers", "POR"},  {"trailblazers", "POR"},  {"kings", "SAC"},
+        {"spurs", "SAS"},          {"raptors", "TOR"},       {"jazz", "UTA"},
+        {"wizards", "WAS"}};
+    auto found = slugs.find(lower_copy(slug));
+    return found == slugs.end() ? "" : found->second;
+}
+} // namespace
+void parse_official_schedule(const json &doc, json &s, const std::string &fetched) {
+    // NBA.com CDN scheduleLeagueV2 (same leagueSchedule envelope the NBA Stats
+    // scheduleleaguev2 endpoint returns). One request covers the full season;
+    // only games already in the snapshot window are enriched, so a 1,200-game
+    // file never floods the dashboard.
+    if (!doc.contains("leagueSchedule") || !doc["leagueSchedule"].is_object())
+        return;
+    const auto &league = doc["leagueSchedule"];
+    auto broadcast_names = [](const json &list) {
+        json out = json::array();
+        if (list.is_array())
+            for (const auto &entry : list) {
+                auto name = entry.value("broadcasterDisplay", "");
+                if (!name.empty())
+                    out.push_back(name);
+            }
+        return out;
+    };
+    int games = 0, matched = 0;
+    for (const auto &date_group : league.value("gameDates", json::array())) {
+        for (const auto &raw : date_group.value("games", json::array())) {
+            if (!raw.contains("homeTeam") || !raw.contains("awayTeam"))
+                continue;
+            ++games;
+            const auto home = canonical_team(raw["homeTeam"].value("teamTricode", "")),
+                       away = canonical_team(raw["awayTeam"].value("teamTricode", ""));
+            const auto starts = clean_timestamp(raw.value("gameDateTimeUTC", ""));
+            const auto official_id = text(raw.value("gameId", json("")));
+            if (home.empty() || away.empty() || official_id.empty() || !parse_time(starts))
+                continue;
+            json *best = nullptr;
+            long long best_diff = 0;
+            for (auto &game : s["games"]) {
+                if (game.value("nbaId", "") == official_id || game.value("officialGameId", "") == official_id) {
+                    best = &game;
+                    best_diff = 0;
+                    break;
+                }
+                if (game.value("home", "") != home || game.value("away", "") != away)
+                    continue;
+                const long long diff = std::llabs(parse_time(game.value("startsAt", "")) - parse_time(starts));
+                if (diff <= 36 * 3600 && (!best || diff < best_diff)) {
+                    best = &game;
+                    best_diff = diff;
+                }
+            }
+            if (!best)
+                continue;
+            ++matched;
+            auto &game = *best;
+            game["officialGameId"] = official_id;
+            game["gameCode"] = raw.value("gameCode", "");
+            game["officialStatus"] = number(raw.value("gameStatus", json(0)));
+            game["officialStatusText"] = raw.value("gameStatusText", "");
+            game["arenaName"] = raw.value("arenaName", "");
+            game["arenaCity"] = raw.value("arenaCity", "");
+            game["arenaState"] = raw.value("arenaState", "");
+            if (game.value("venue", "").empty() && !raw.value("arenaName", "").empty())
+                game["venue"] = raw.value("arenaName", "");
+            game["neutralSite"] = raw.value("isNeutral", false);
+            game["postponedStatus"] = raw.value("postponedStatus", "");
+            game["seriesText"] = raw.value("seriesText", "");
+            game["gameLabel"] = raw.value("gameLabel", "");
+            game["gameSubLabel"] = raw.value("gameSubLabel", "");
+            const auto &casters = raw.value("broadcasters", json::object());
+            game["broadcasts"] = {{"national", broadcast_names(casters.value("nationalBroadcasters", json::array()))},
+                                  {"nationalRadio", broadcast_names(casters.value("nationalRadioBroadcasters", json::array()))},
+                                  {"nationalOtt", broadcast_names(casters.value("nationalOttBroadcasters", json::array()))},
+                                  {"homeTv", broadcast_names(casters.value("homeTvBroadcasters", json::array()))},
+                                  {"homeRadio", broadcast_names(casters.value("homeRadioBroadcasters", json::array()))},
+                                  {"awayTv", broadcast_names(casters.value("awayTvBroadcasters", json::array()))},
+                                  {"awayRadio", broadcast_names(casters.value("awayRadioBroadcasters", json::array()))}};
+            json leaders = json::array();
+            for (const auto &leader : raw.value("pointsLeaders", json::array())) {
+                auto name = leader.value("firstName", "") + std::string(" ") + leader.value("lastName", "");
+                while (!name.empty() && name.front() == ' ')
+                    name.erase(name.begin());
+                while (!name.empty() && name.back() == ' ')
+                    name.pop_back();
+                leaders.push_back({{"name", name},
+                                   {"team", leader.value("teamTricode", "")},
+                                   {"points", number(leader.value("points", json(0)))}});
+            }
+            game["pointsLeaders"] = leaders;
+        }
+    }
+    s["leagueContext"]["schedule"] = {{"seasonYear", league.value("seasonYear", "")},
+                                      {"leagueId", league.value("leagueId", "")},
+                                      {"games", games},
+                                      {"weeks", league.value("weeks", json::array()).size()},
+                                      {"matchedGames", matched},
+                                      {"asOf", fetched}};
+}
+std::string daily_lineup_date_token(long long epoch_seconds) {
+    // NBA daily-lineup files are named for the league's Eastern game date.
+    // A fixed UTC-4 offset tracks that date for the whole NBA season window
+    // closely enough to pick the right file; the parser then matches games
+    // by teams, never by the token alone.
+    auto token = iso_at(epoch_seconds - 4 * 3600).substr(0, 10);
+    token.erase(std::remove(token.begin(), token.end(), '-'), token.end());
+    return token;
+}
+void parse_daily_lineups(const json &doc, json &s, const std::string &fetched, const std::string &date_token) {
+    // stats.nba.com/js/data/leaders/00_daily_lineups_YYYYMMDD.json. Only an
+    // explicitly confirmed starter (position listed, roster active) may set
+    // starterConfirmed; expected/projected entries stay visible context.
+    if (!doc.contains("games") || !doc["games"].is_array())
+        return;
+    const auto target = date_token.size() == 8
+                            ? parse_time(date_token.substr(0, 4) + "-" + date_token.substr(4, 2) + "-" +
+                                         date_token.substr(6, 2) + "T12:00:00Z")
+                            : 0;
+    int players = 0, confirmed = 0, games_matched = 0;
+    if (!s.contains("lineups") || !s["lineups"].is_array())
+        s["lineups"] = json::array();
+    for (const auto &raw_game : doc["games"]) {
+        if (!raw_game.contains("homeTeam") || !raw_game.contains("awayTeam"))
+            continue;
+        const auto official_id = text(raw_game.value("gameId", json("")));
+        const auto home = canonical_team(raw_game["homeTeam"].value("teamAbbreviation", "")),
+                   away = canonical_team(raw_game["awayTeam"].value("teamAbbreviation", ""));
+        json *best = nullptr;
+        long long best_diff = 0;
+        for (auto &game : s["games"]) {
+            if (!official_id.empty() &&
+                (game.value("nbaId", "") == official_id || game.value("officialGameId", "") == official_id)) {
+                best = &game;
+                best_diff = 0;
+                break;
+            }
+            if (game.value("home", "") != home || game.value("away", "") != away || !target)
+                continue;
+            const long long diff = std::llabs(parse_time(game.value("startsAt", "")) - target);
+            if (diff <= 48 * 3600 && (!best || diff < best_diff)) {
+                best = &game;
+                best_diff = diff;
+            }
+        }
+        json summary = {{"homeConfirmed", 0}, {"awayConfirmed", 0}, {"homeListed", 0}, {"awayListed", 0},
+                        {"asOf", fetched}};
+        for (const std::string side : {"home", "away"}) {
+            const auto &team_doc = raw_game[side + "Team"];
+            const auto abbr = canonical_team(team_doc.value("teamAbbreviation", side == "home" ? home : away));
+            for (const auto &raw_player : team_doc.value("players", json::array())) {
+                ++players;
+                summary[side + "Listed"] = number(summary[side + "Listed"]) + 1;
+                auto name = raw_player.value("playerName", "");
+                if (name.empty())
+                    name = raw_player.value("firstName", "") + std::string(" ") + raw_player.value("lastName", "");
+                const auto key = normalize_name(name);
+                if (key.empty())
+                    continue;
+                const auto lineup_status = raw_player.value("lineupStatus", ""),
+                           roster_status = raw_player.value("rosterStatus", ""),
+                           position = raw_player.value("position", "");
+                const auto status_key = lower_copy(lineup_status), roster_key = lower_copy(roster_status);
+                const bool is_confirmed =
+                    (status_key == "confirmed" || status_key == "starter" || status_key == "starting") &&
+                    !position.empty() && roster_key != "inactive" && roster_key != "out";
+                if (is_confirmed) {
+                    ++confirmed;
+                    summary[side + "Confirmed"] = number(summary[side + "Confirmed"]) + 1;
+                }
+                if (!best)
+                    continue;
+                const auto game_id = best->value("id", "");
+                if (s["players"].contains(key)) {
+                    auto &p = s["players"][key];
+                    p["lineup"] = {{"gameId", game_id},
+                                   {"officialGameId", official_id},
+                                   {"team", abbr},
+                                   {"position", position},
+                                   {"lineupStatus", lineup_status},
+                                   {"rosterStatus", roster_status},
+                                   {"timestamp", text(raw_player.value("timestamp", json("")))},
+                                   {"confirmed", is_confirmed},
+                                   {"asOf", fetched}};
+                    if (is_confirmed) {
+                        p["starterConfirmed"] = true;
+                        p["starterGameId"] = game_id;
+                    } else if (p.value("starterGameId", "") == game_id)
+                        p["starterConfirmed"] = false;
+                }
+                if (is_confirmed) {
+                    bool dup = false;
+                    for (const auto &entry : s["lineups"])
+                        if (entry.value("gameId", "") == game_id && normalize_name(entry.value("player", "")) == key)
+                            dup = true;
+                    if (!dup)
+                        s["lineups"].push_back({{"gameId", game_id},
+                                                {"player", name},
+                                                {"team", abbr},
+                                                {"confirmed", true},
+                                                {"source", "nba_daily_lineups"}});
+                }
+            }
+        }
+        if (best) {
+            ++games_matched;
+            (*best)["lineupSummary"] = summary;
+        }
+    }
+    s["leagueContext"]["dailyLineups"] = {{"date", date_token},
+                                          {"games", doc["games"].size()},
+                                          {"matchedGames", games_matched},
+                                          {"players", players},
+                                          {"confirmedStarters", confirmed},
+                                          {"asOf", fetched}};
+}
+void parse_player_movement(const json &doc, json &s, const std::string &fetched, const std::string &season) {
+    // stats.nba.com/js/data/playermovement/NBA_Player_Movement.json: the static
+    // archive behind the NBA transactions page. Rows are dated facts with no
+    // effective time, so they are context only — never eligibility evidence.
+    const auto root = doc.value("NBA_Player_Movement", json::object());
+    const auto rows = root.value("rows", json::array());
+    if (!rows.is_array())
+        return;
+    std::string cutoff;
+    if (season.size() >= 4)
+        cutoff = season.substr(0, 4) + "-07-01";
+    std::vector<json> kept;
+    for (const auto &row : rows) {
+        if (!row.is_object())
+            continue;
+        const auto date = text(row.value("TRANSACTION_DATE", json(""))).substr(0, 10);
+        if (!parse_time(date) || (!cutoff.empty() && date < cutoff))
+            continue;
+        const auto player_slug = text(row.value("PLAYER_SLUG", json(""))),
+                   team_slug = text(row.value("TEAM_SLUG", json("")));
+        auto player_name = titleize_slug(player_slug);
+        const auto key = normalize_name(player_slug);
+        if (!key.empty() && s["players"].contains(key))
+            player_name = s["players"][key].value("name", player_name);
+        kept.push_back({{"date", date},
+                        {"type", text(row.value("Transaction_Type", row.value("TRANSACTION_TYPE", json(""))))},
+                        {"description", text(row.value("TRANSACTION_DESCRIPTION", json("")))},
+                        {"teamSlug", team_slug},
+                        {"teamAbbr", abbr_from_slug(team_slug)},
+                        {"teamId", text(row.value("TEAM_ID", json("")))},
+                        {"playerSlug", player_slug},
+                        {"playerId", text(row.value("PLAYER_ID", json("")))},
+                        {"playerName", player_name},
+                        {"asOf", fetched}});
+    }
+    std::sort(kept.begin(), kept.end(), [](const json &a, const json &b) {
+        if (a.value("date", "") != b.value("date", ""))
+            return a.value("date", "") > b.value("date", "");
+        return a.value("playerSlug", "") < b.value("playerSlug", "");
+    });
+    if (kept.size() > 120)
+        kept.resize(120);
+    s["transactions"] = kept;
+    std::set<std::string> attached;
+    for (const auto &entry : kept) {
+        const auto key = normalize_name(entry.value("playerSlug", ""));
+        if (key.empty() || attached.count(key) || !s["players"].contains(key))
+            continue;
+        s["players"][key]["latestTransaction"] = {{"date", entry.value("date", "")},
+                                                  {"type", entry.value("type", "")},
+                                                  {"description", entry.value("description", "")},
+                                                  {"teamSlug", entry.value("teamSlug", "")},
+                                                  {"teamAbbr", entry.value("teamAbbr", "")},
+                                                  {"asOf", fetched}};
+        attached.insert(key);
+    }
+    s["leagueContext"]["transactions"] = {{"totalRows", rows.size()},
+                                          {"retained", kept.size()},
+                                          {"cutoff", cutoff},
+                                          {"asOf", fetched}};
+}
+void parse_player_index(const json &doc, json &s, const std::string &fetched) {
+    // nba_api PlayerIndex: league roster crosswalk with bio/draft context and
+    // current per-game PTS/REB/AST. It may create a bare roster record (the
+    // refresh later keeps only active-team players); it never creates logs.
+    for (const auto &row : nba_rows(doc)) {
+        const auto first = text(row.value("PLAYER_FIRST_NAME", json(""))),
+                   last = text(row.value("PLAYER_LAST_NAME", json("")));
+        const auto abbr = canonical_team(text(row.value("TEAM_ABBREVIATION", json(""))));
+        if (first.empty() || last.empty() || abbr.empty() || abbr.size() > 3)
+            continue;
+        const auto defunct = row.value("IS_DEFUNCT", json(false));
+        if (defunct == true || number(defunct, 0) == 1)
+            continue;
+        const auto name = first + " " + last;
+        const auto key = normalize_name(name);
+        if (key.empty())
+            continue;
+        if (!s["players"].contains(key))
+            s["players"][key] = {{"name", name}, {"team", abbr}, {"injury", "Unknown"}, {"source", "nba_stats"}};
+        auto &p = s["players"][key];
+        if (p.value("name", "").empty())
+            p["name"] = name;
+        double height_inches = 0;
+        const auto height = text(row.value("HEIGHT", json("")));
+        const auto dash = height.find('-');
+        if (dash != std::string::npos)
+            height_inches = number(height.substr(0, dash), 0) * 12 + number(height.substr(dash + 1), 0);
+        if (height_inches < 60 || height_inches > 96)
+            height_inches = 0;
+        p["playerIndex"] = {{"personId", text(row.value("PERSON_ID", json("")))},
+                            {"slug", text(row.value("PLAYER_SLUG", json("")))},
+                            {"teamId", text(row.value("TEAM_ID", json("")))},
+                            {"teamSlug", text(row.value("TEAM_SLUG", json("")))},
+                            {"teamAbbr", abbr},
+                            {"jersey", text(row.value("JERSEY_NUMBER", json("")))},
+                            {"position", text(row.value("POSITION", json("")))},
+                            {"height", height},
+                            {"heightInches", height_inches ? json(height_inches) : json(nullptr)},
+                            {"weight", number(row.value("WEIGHT", json(0)))},
+                            {"college", text(row.value("COLLEGE", json("")))},
+                            {"country", text(row.value("COUNTRY", json("")))},
+                            {"draftYear", text(row.value("DRAFT_YEAR", json("")))},
+                            {"draftRound", text(row.value("DRAFT_ROUND", json("")))},
+                            {"draftNumber", text(row.value("DRAFT_NUMBER", json("")))},
+                            {"rosterStatus", row.value("ROSTER_STATUS", json(nullptr))},
+                            {"pts", number(row.value("PTS", json(0)))},
+                            {"reb", number(row.value("REB", json(0)))},
+                            {"ast", number(row.value("AST", json(0)))},
+                            {"statsTimeframe", text(row.value("STATS_TIMEFRAME", json("")))},
+                            {"fromYear", text(row.value("FROM_YEAR", json("")))},
+                            {"toYear", text(row.value("TO_YEAR", json("")))},
+                            {"asOf", fetched}};
+        if (!text(row.value("PERSON_ID", json(""))).empty())
+            p["nbaId"] = text(row.value("PERSON_ID", json("")));
+        if (p.value("position", "").empty() && !text(row.value("POSITION", json(""))).empty())
+            p["position"] = text(row.value("POSITION", json("")));
+    }
+}
+void parse_player_clutch(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueDashPlayerClutch (Last 5 Minutes, within 5, Totals).
+    for (const auto &row : nba_rows(doc)) {
+        const auto key = normalize_name(text(row.value("PLAYER_NAME", json(""))));
+        if (key.empty() || !s["players"].contains(key))
+            continue;
+        s["players"][key]["clutch"] = {{"gp", number(row.value("GP", json(0)))},
+                                       {"w", number(row.value("W", json(0)))},
+                                       {"l", number(row.value("L", json(0)))},
+                                       {"winPct", number(row.value("W_PCT", json(0)))},
+                                       {"min", number(row.value("MIN", json(0)))},
+                                       {"fgPct", number(row.value("FG_PCT", json(0)))},
+                                       {"fg3Pct", number(row.value("FG3_PCT", json(0)))},
+                                       {"ftPct", number(row.value("FT_PCT", json(0)))},
+                                       {"reb", number(row.value("REB", json(0)))},
+                                       {"ast", number(row.value("AST", json(0)))},
+                                       {"tov", number(row.value("TOV", json(0)))},
+                                       {"stl", number(row.value("STL", json(0)))},
+                                       {"blk", number(row.value("BLK", json(0)))},
+                                       {"pts", number(row.value("PTS", json(0)))},
+                                       {"plusMinus", number(row.value("PLUS_MINUS", json(0)))},
+                                       {"fantasyPts", number(row.value("NBA_FANTASY_PTS", json(0)))},
+                                       {"dd2", number(row.value("DD2", json(0)))},
+                                       {"td3", number(row.value("TD3", json(0)))},
+                                       {"asOf", fetched}};
+    }
+}
+void parse_team_clutch(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueDashTeamClutch (Last 5 Minutes, within 5, Totals).
+    for (const auto &row : nba_rows(doc)) {
+        auto abbr = canonical_team(text(row.value("TEAM_ABBREVIATION", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            abbr = abbr_from_name(text(row.value("TEAM_NAME", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            continue;
+        auto &t = ensure_team(s, abbr);
+        t["clutch"] = {{"gp", number(row.value("GP", json(0)))},
+                       {"w", number(row.value("W", json(0)))},
+                       {"l", number(row.value("L", json(0)))},
+                       {"winPct", number(row.value("W_PCT", json(0)))},
+                       {"min", number(row.value("MIN", json(0)))},
+                       {"fgPct", number(row.value("FG_PCT", json(0)))},
+                       {"fg3Pct", number(row.value("FG3_PCT", json(0)))},
+                       {"ftPct", number(row.value("FT_PCT", json(0)))},
+                       {"reb", number(row.value("REB", json(0)))},
+                       {"ast", number(row.value("AST", json(0)))},
+                       {"tov", number(row.value("TOV", json(0)))},
+                       {"stl", number(row.value("STL", json(0)))},
+                       {"blk", number(row.value("BLK", json(0)))},
+                       {"pts", number(row.value("PTS", json(0)))},
+                       {"plusMinus", number(row.value("PLUS_MINUS", json(0)))},
+                       {"asOf", fetched}};
+    }
+}
+void parse_player_hustle(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueHustleStatsPlayer (season totals).
+    for (const auto &row : nba_rows(doc)) {
+        const auto key = normalize_name(text(row.value("PLAYER_NAME", json(""))));
+        if (key.empty() || !s["players"].contains(key))
+            continue;
+        s["players"][key]["hustle"] = {{"g", number(row.value("G", json(0)))},
+                                       {"min", number(row.value("MIN", json(0)))},
+                                       {"contestedShots", number(row.value("CONTESTED_SHOTS", json(0)))},
+                                       {"contestedShots2pt", number(row.value("CONTESTED_SHOTS_2PT", json(0)))},
+                                       {"contestedShots3pt", number(row.value("CONTESTED_SHOTS_3PT", json(0)))},
+                                       {"deflections", number(row.value("DEFLECTIONS", json(0)))},
+                                       {"chargesDrawn", number(row.value("CHARGES_DRAWN", json(0)))},
+                                       {"screenAssists", number(row.value("SCREEN_ASSISTS", json(0)))},
+                                       {"screenAstPts", number(row.value("SCREEN_AST_PTS", json(0)))},
+                                       {"looseBalls", number(row.value("LOOSE_BALLS_RECOVERED", json(0)))},
+                                       {"offLooseBalls", number(row.value("OFF_LOOSE_BALLS_RECOVERED", json(0)))},
+                                       {"defLooseBalls", number(row.value("DEF_LOOSE_BALLS_RECOVERED", json(0)))},
+                                       {"boxOuts", number(row.value("BOX_OUTS", json(0)))},
+                                       {"offBoxOuts", number(row.value("OFF_BOXOUTS", json(0)))},
+                                       {"defBoxOuts", number(row.value("DEF_BOXOUTS", json(0)))},
+                                       {"asOf", fetched}};
+    }
+}
+void parse_team_hustle(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueHustleStatsTeam (season totals).
+    for (const auto &row : nba_rows(doc)) {
+        auto abbr = canonical_team(text(row.value("TEAM_ABBREVIATION", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            abbr = abbr_from_name(text(row.value("TEAM_NAME", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            continue;
+        auto &t = ensure_team(s, abbr);
+        t["hustle"] = {{"min", number(row.value("MIN", json(0)))},
+                       {"contestedShots", number(row.value("CONTESTED_SHOTS", json(0)))},
+                       {"contestedShots2pt", number(row.value("CONTESTED_SHOTS_2PT", json(0)))},
+                       {"contestedShots3pt", number(row.value("CONTESTED_SHOTS_3PT", json(0)))},
+                       {"deflections", number(row.value("DEFLECTIONS", json(0)))},
+                       {"chargesDrawn", number(row.value("CHARGES_DRAWN", json(0)))},
+                       {"screenAssists", number(row.value("SCREEN_ASSISTS", json(0)))},
+                       {"screenAstPts", number(row.value("SCREEN_AST_PTS", json(0)))},
+                       {"looseBalls", number(row.value("LOOSE_BALLS_RECOVERED", json(0)))},
+                       {"offLooseBalls", number(row.value("OFF_LOOSE_BALLS_RECOVERED", json(0)))},
+                       {"defLooseBalls", number(row.value("DEF_LOOSE_BALLS_RECOVERED", json(0)))},
+                       {"boxOuts", number(row.value("BOX_OUTS", json(0)))},
+                       {"offBoxOuts", number(row.value("OFF_BOXOUTS", json(0)))},
+                       {"defBoxOuts", number(row.value("DEF_BOXOUTS", json(0)))},
+                       {"asOf", fetched}};
+    }
+}
+void parse_player_estimated_metrics(const json &doc, json &s, const std::string &fetched) {
+    // nba_api PlayerEstimatedMetrics.
+    for (const auto &row : nba_rows(doc)) {
+        const auto key = normalize_name(text(row.value("PLAYER_NAME", json(""))));
+        if (key.empty() || !s["players"].contains(key))
+            continue;
+        s["players"][key]["estimatedMetrics"] = {
+            {"gp", number(row.value("GP", json(0)))},
+            {"w", number(row.value("W", json(0)))},
+            {"l", number(row.value("L", json(0)))},
+            {"winPct", number(row.value("W_PCT", json(0)))},
+            {"min", number(row.value("MIN", json(0)))},
+            {"eOffRating", number(row.value("E_OFF_RATING", json(0)))},
+            {"eDefRating", number(row.value("E_DEF_RATING", json(0)))},
+            {"eNetRating", number(row.value("E_NET_RATING", json(0)))},
+            {"eAstRatio", number(row.value("E_AST_RATIO", json(0)))},
+            {"eOrebPct", number(row.value("E_OREB_PCT", json(0)))},
+            {"eDrebPct", number(row.value("E_DREB_PCT", json(0)))},
+            {"eRebPct", number(row.value("E_REB_PCT", json(0)))},
+            {"eTovPct", number(row.value("E_TOV_PCT", json(0)))},
+            {"eUsgPct", number(row.value("E_USG_PCT", json(0)))},
+            {"ePace", number(row.value("E_PACE", json(0)))},
+            {"ranks", {{"eOffRating", number(row.value("E_OFF_RATING_RANK", json(0)))},
+                       {"eDefRating", number(row.value("E_DEF_RATING_RANK", json(0)))},
+                       {"eNetRating", number(row.value("E_NET_RATING_RANK", json(0)))},
+                       {"eUsgPct", number(row.value("E_USG_PCT_RANK", json(0)))},
+                       {"ePace", number(row.value("E_PACE_RANK", json(0)))}}},
+            {"asOf", fetched}};
+    }
+}
+void parse_team_estimated_metrics(const json &doc, json &s, const std::string &fetched) {
+    // nba_api TeamEstimatedMetrics (no abbreviation column; map the full name).
+    for (const auto &row : nba_rows(doc)) {
+        auto abbr = abbr_from_name(text(row.value("TEAM_NAME", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            continue;
+        auto &t = ensure_team(s, abbr);
+        t["estimatedMetrics"] = {{"gp", number(row.value("GP", json(0)))},
+                                 {"w", number(row.value("W", json(0)))},
+                                 {"l", number(row.value("L", json(0)))},
+                                 {"winPct", number(row.value("W_PCT", json(0)))},
+                                 {"min", number(row.value("MIN", json(0)))},
+                                 {"eOffRating", number(row.value("E_OFF_RATING", json(0)))},
+                                 {"eDefRating", number(row.value("E_DEF_RATING", json(0)))},
+                                 {"eNetRating", number(row.value("E_NET_RATING", json(0)))},
+                                 {"ePace", number(row.value("E_PACE", json(0)))},
+                                 {"eAstRatio", number(row.value("E_AST_RATIO", json(0)))},
+                                 {"eOrebPct", number(row.value("E_OREB_PCT", json(0)))},
+                                 {"eDrebPct", number(row.value("E_DREB_PCT", json(0)))},
+                                 {"eRebPct", number(row.value("E_REB_PCT", json(0)))},
+                                 {"eTovPct", number(row.value("E_TM_TOV_PCT", json(0)))},
+                                 {"ranks", {{"eOffRating", number(row.value("E_OFF_RATING_RANK", json(0)))},
+                                            {"eDefRating", number(row.value("E_DEF_RATING_RANK", json(0)))},
+                                            {"eNetRating", number(row.value("E_NET_RATING_RANK", json(0)))},
+                                            {"ePace", number(row.value("E_PACE_RANK", json(0)))}}},
+                                 {"asOf", fetched}};
+    }
+}
+void parse_player_tracking_shots(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueDashPlayerPtShot (overall tracking shooting profile).
+    for (const auto &row : nba_rows(doc)) {
+        const auto key = normalize_name(text(row.value("PLAYER_NAME", json(""))));
+        if (key.empty() || !s["players"].contains(key))
+            continue;
+        s["players"][key]["trackingShooting"] = {
+            {"gp", number(row.value("GP", json(0)))},
+            {"g", number(row.value("G", json(0)))},
+            {"lastTeam", canonical_team(text(row.value("PLAYER_LAST_TEAM_ABBREVIATION", json(""))))},
+            {"fgaFrequency", number(row.value("FGA_FREQUENCY", json(0)))},
+            {"fgm", number(row.value("FGM", json(0)))},
+            {"fga", number(row.value("FGA", json(0)))},
+            {"fgPct", number(row.value("FG_PCT", json(0)))},
+            {"efgPct", number(row.value("EFG_PCT", json(0)))},
+            {"fg2aFrequency", number(row.value("FG2A_FREQUENCY", json(0)))},
+            {"fg2m", number(row.value("FG2M", json(0)))},
+            {"fg2a", number(row.value("FG2A", json(0)))},
+            {"fg2Pct", number(row.value("FG2_PCT", json(0)))},
+            {"fg3aFrequency", number(row.value("FG3A_FREQUENCY", json(0)))},
+            {"fg3m", number(row.value("FG3M", json(0)))},
+            {"fg3a", number(row.value("FG3A", json(0)))},
+            {"fg3Pct", number(row.value("FG3_PCT", json(0)))},
+            {"asOf", fetched}};
+    }
+}
+void parse_player_tracking_defense(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueDashPtDefend (DefenseCategory=Overall).
+    for (const auto &row : nba_rows(doc)) {
+        const auto key = normalize_name(text(row.value("PLAYER_NAME", json(""))));
+        if (key.empty() || !s["players"].contains(key))
+            continue;
+        s["players"][key]["trackingDefense"] = {
+            {"gp", number(row.value("GP", json(0)))},
+            {"g", number(row.value("G", json(0)))},
+            {"lastTeam", canonical_team(text(row.value("PLAYER_LAST_TEAM_ABBREVIATION", json(""))))},
+            {"position", text(row.value("PLAYER_POSITION", json("")))},
+            {"freq", number(row.value("FREQ", json(0)))},
+            {"dFgm", number(row.value("D_FGM", json(0)))},
+            {"dFga", number(row.value("D_FGA", json(0)))},
+            {"dFgPct", number(row.value("D_FG_PCT", json(0)))},
+            {"normalFgPct", number(row.value("NORMAL_FG_PCT", json(0)))},
+            {"pctPlusMinus", number(row.value("PCT_PLUSMINUS", json(0)))},
+            {"asOf", fetched}};
+    }
+}
+void parse_team_tracking_defense(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueDashPtTeamDefend (DefenseCategory=Overall).
+    for (const auto &row : nba_rows(doc)) {
+        auto abbr = canonical_team(text(row.value("TEAM_ABBREVIATION", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            abbr = abbr_from_name(text(row.value("TEAM_NAME", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            continue;
+        auto &t = ensure_team(s, abbr);
+        t["trackingDefense"] = {{"gp", number(row.value("GP", json(0)))},
+                                {"g", number(row.value("G", json(0)))},
+                                {"freq", number(row.value("FREQ", json(0)))},
+                                {"dFgm", number(row.value("D_FGM", json(0)))},
+                                {"dFga", number(row.value("D_FGA", json(0)))},
+                                {"dFgPct", number(row.value("D_FG_PCT", json(0)))},
+                                {"normalFgPct", number(row.value("NORMAL_FG_PCT", json(0)))},
+                                {"pctPlusMinus", number(row.value("PCT_PLUSMINUS", json(0)))},
+                                {"asOf", fetched}};
+    }
+}
+void parse_team_opponent_shots(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueDashOppPtShot: the shot profile opponents post vs a team.
+    for (const auto &row : nba_rows(doc)) {
+        auto abbr = canonical_team(text(row.value("TEAM_ABBREVIATION", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            abbr = abbr_from_name(text(row.value("TEAM_NAME", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            continue;
+        auto &t = ensure_team(s, abbr);
+        t["opponentShotProfile"] = {{"gp", number(row.value("GP", json(0)))},
+                                    {"g", number(row.value("G", json(0)))},
+                                    {"fgaFrequency", number(row.value("FGA_FREQUENCY", json(0)))},
+                                    {"fgm", number(row.value("FGM", json(0)))},
+                                    {"fga", number(row.value("FGA", json(0)))},
+                                    {"fgPct", number(row.value("FG_PCT", json(0)))},
+                                    {"efgPct", number(row.value("EFG_PCT", json(0)))},
+                                    {"fg2Pct", number(row.value("FG2_PCT", json(0)))},
+                                    {"fg3Pct", number(row.value("FG3_PCT", json(0)))},
+                                    {"asOf", fetched}};
+    }
+}
+void parse_team_top_lineups(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueDashLineups (GroupQuantity=5): keep each team's most-used
+    // five-man unit as context; the full lineup table stays at the source.
+    std::map<std::string, json> best;
+    std::map<std::string, double> best_minutes;
+    for (const auto &row : nba_rows(doc)) {
+        auto abbr = canonical_team(text(row.value("TEAM_ABBREVIATION", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            abbr = abbr_from_name(text(row.value("TEAM_NAME", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            continue;
+        const double minutes = number(row.value("MIN", json(0)));
+        if (best.count(abbr) && minutes <= best_minutes[abbr])
+            continue;
+        const double gp = number(row.value("GP", json(0)));
+        best[abbr] = {{"groupName", text(row.value("GROUP_NAME", json("")))},
+                      {"groupId", text(row.value("GROUP_ID", json("")))},
+                      {"gp", gp},
+                      {"w", number(row.value("W", json(0)))},
+                      {"l", number(row.value("L", json(0)))},
+                      {"winPct", number(row.value("W_PCT", json(0)))},
+                      {"min", minutes},
+                      {"minutesPerGame", gp > 0 ? minutes / gp : 0},
+                      {"fgPct", number(row.value("FG_PCT", json(0)))},
+                      {"fg3Pct", number(row.value("FG3_PCT", json(0)))},
+                      {"ftPct", number(row.value("FT_PCT", json(0)))},
+                      {"reb", number(row.value("REB", json(0)))},
+                      {"ast", number(row.value("AST", json(0)))},
+                      {"tov", number(row.value("TOV", json(0)))},
+                      {"stl", number(row.value("STL", json(0)))},
+                      {"blk", number(row.value("BLK", json(0)))},
+                      {"pts", number(row.value("PTS", json(0)))},
+                      {"plusMinus", number(row.value("PLUS_MINUS", json(0)))},
+                      {"asOf", fetched}};
+        best_minutes[abbr] = minutes;
+    }
+    for (auto &item : best) {
+        auto &t = ensure_team(s, item.first);
+        t["topLineup"] = item.second;
+    }
+}
 json scrape_saved_html(const std::string &html, const std::string &player, const std::string &team,
                        const std::string &observed_at) {
     if (html.size() > 4 * 1024 * 1024)
@@ -1617,6 +2281,196 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                   four_factors, four_factors_count,
                                   "Effective FG%, free-throw rate, turnover and offensive-rebound rates "
                                   "(plus opponent values). Context for moneyline/team-total research."));
+    // Official/league expansion (awesome-nba-data Official & League Data):
+    // NBA.com full-season schedule, NBA daily lineups, the static transactions
+    // archive, and the remaining league-wide NBA Stats datasets that return
+    // the whole league in one request. Season datasets are 6-hour cached
+    // context and never alter a probability; only an explicitly confirmed
+    // daily-lineup starter can satisfy the first-basket starter guard.
+    auto player_field_count = [&s](const char *field) {
+        int count = 0;
+        for (const auto &item : s["players"].items())
+            if (item.value().contains(field))
+                ++count;
+        return count;
+    };
+    auto team_field_count = [&s](const char *field) {
+        int count = 0;
+        for (const auto &item : s["teams"].items())
+            if (item.value().contains(field))
+                ++count;
+        return count;
+    };
+    auto official_schedule = get("https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json", 3600, 21600);
+    if (!official_schedule.data.is_null())
+        parse_official_schedule(official_schedule.data, s, official_schedule.fetched_at);
+    const int schedule_count =
+        s.contains("leagueContext") && s["leagueContext"].contains("schedule")
+            ? static_cast<int>(number(s["leagueContext"]["schedule"].value("games", json(0))))
+            : 0;
+    s["sources"].push_back(source("nba-official-schedule", "NBA.com full-season schedule (scheduleLeagueV2)",
+                                  official_schedule, schedule_count,
+                                  "Every scheduled game with NBA game ID/code, UTC tip, arena/city/state, "
+                                  "neutral-site and postponement flags, series labels, points leaders and "
+                                  "TV/radio/OTT broadcasters. Enriches games already in the window; the "
+                                  "full season is counted, not dumped into the dashboard."));
+    const auto lineup_token = daily_lineup_date_token(now_seconds());
+    auto daily_lineups = get("https://stats.nba.com/js/data/leaders/00_daily_lineups_" + lineup_token + ".json",
+                             300, 0);
+    if (!daily_lineups.data.is_null())
+        parse_daily_lineups(daily_lineups.data, s, daily_lineups.fetched_at, lineup_token);
+    const int daily_lineup_count =
+        s.contains("leagueContext") && s["leagueContext"].contains("dailyLineups")
+            ? static_cast<int>(number(s["leagueContext"]["dailyLineups"].value("players", json(0))))
+            : 0;
+    s["sources"].push_back(source("nba-daily-lineups", "NBA daily lineups (00_daily_lineups)", daily_lineups,
+                                  daily_lineup_count,
+                                  "Per-game listed players with position, lineup and roster status for " +
+                                      lineup_token +
+                                      ". Only status Confirmed with a listed position confirms a starter "
+                                      "for first basket; Expected/projected entries are context and never "
+                                      "confirm. A missing file (no games yet) stays unavailable."));
+    auto player_movement = get("https://stats.nba.com/js/data/playermovement/NBA_Player_Movement.json", 21600,
+                               172800);
+    if (!player_movement.data.is_null())
+        parse_player_movement(player_movement.data, s, player_movement.fetched_at, season);
+    s["sources"].push_back(source("nba-transactions", "NBA player transactions (NBA_Player_Movement)",
+                                  player_movement, static_cast<int>(s["transactions"].size()),
+                                  "Static archive behind the NBA transactions page: signings, waivers, "
+                                  "trades, waiver awards and contract conversions. Current-season rows are "
+                                  "kept (latest 120) and attached to players as dated context; rows have no "
+                                  "effective time and are never read as availability or eligibility."));
+    auto player_index = get("https://stats.nba.com/stats/playerindex?Active=&AllStar=&College=&Country=&"
+                            "DraftPick=&DraftRound=&DraftYear=&Height=&Historical=&LeagueID=00&Season=" +
+                                season + "&TeamID=0&Weight=",
+                            21600, 172800);
+    if (!player_index.data.is_null())
+        parse_player_index(player_index.data, s, player_index.fetched_at);
+    s["sources"].push_back(source("nba-player-index", "NBA player index (nba_api PlayerIndex)", player_index,
+                                  player_field_count("playerIndex"),
+                                  "League roster crosswalk: team, jersey, position, height/weight, college, "
+                                  "country, draft year/round/pick, roster status, career years and current "
+                                  "PTS/REB/AST. Context; a bare index record carries no game logs and "
+                                  "cannot produce a projection by itself."));
+    auto team_estimated = get("https://stats.nba.com/stats/teamestimatedmetrics?LeagueID=00&Season=" + season +
+                                  "&SeasonType=Regular%20Season",
+                              21600, 172800);
+    if (!team_estimated.data.is_null())
+        parse_team_estimated_metrics(team_estimated.data, s, team_estimated.fetched_at);
+    s["sources"].push_back(source("nba-team-estimated", "NBA team estimated metrics (TeamEstimatedMetrics)",
+                                  team_estimated, team_field_count("estimatedMetrics"),
+                                  "Estimated offensive/defensive/net rating, pace, assist/rebound/turnover "
+                                  "rates and league ranks. Context beside the measured Advanced ratings."));
+    auto player_estimated = get("https://stats.nba.com/stats/playerestimatedmetrics?LeagueID=00&Season=" + season +
+                                    "&SeasonType=Regular%20Season",
+                                21600, 172800);
+    if (!player_estimated.data.is_null())
+        parse_player_estimated_metrics(player_estimated.data, s, player_estimated.fetched_at);
+    s["sources"].push_back(source("nba-player-estimated", "NBA player estimated metrics (PlayerEstimatedMetrics)",
+                                  player_estimated, player_field_count("estimatedMetrics"),
+                                  "Estimated offensive/defensive/net rating, pace, assist/rebound/turnover/"
+                                  "usage rates and league ranks. Context; dated game logs remain the model "
+                                  "input."));
+    const auto clutch_query =
+        "?AheadBehind=Ahead%20or%20Behind&ClutchTime=Last%205%20Minutes&LeagueID=00&MeasureType=Base&"
+        "PerMode=Totals&PointDiff=5&Season=" +
+        season + "&SeasonType=Regular%20Season";
+    auto team_clutch = get("https://stats.nba.com/stats/leaguedashteamclutch" + clutch_query, 21600, 172800);
+    if (!team_clutch.data.is_null())
+        parse_team_clutch(team_clutch.data, s, team_clutch.fetched_at);
+    s["sources"].push_back(source("nba-team-clutch", "NBA team clutch stats (LeagueDashTeamClutch)", team_clutch,
+                                  team_field_count("clutch"),
+                                  "Clutch totals (last 5 minutes, score within 5): record, shooting, "
+                                  "rebounds, assists, turnovers, steals, blocks, points and plus-minus. "
+                                  "Context only."));
+    auto player_clutch = get("https://stats.nba.com/stats/leaguedashplayerclutch" + clutch_query, 21600, 172800);
+    if (!player_clutch.data.is_null())
+        parse_player_clutch(player_clutch.data, s, player_clutch.fetched_at);
+    s["sources"].push_back(source("nba-player-clutch", "NBA player clutch stats (LeagueDashPlayerClutch)",
+                                  player_clutch, player_field_count("clutch"),
+                                  "Clutch totals (last 5 minutes, score within 5) with fantasy points and "
+                                  "double-/triple-double counts. Context beside the log-based projection."));
+    auto team_hustle = get("https://stats.nba.com/stats/leaguehustlestatsteam?LeagueID=00&PerMode=Totals&Season=" +
+                               season + "&SeasonType=Regular%20Season",
+                           21600, 172800);
+    if (!team_hustle.data.is_null())
+        parse_team_hustle(team_hustle.data, s, team_hustle.fetched_at);
+    s["sources"].push_back(source("nba-team-hustle", "NBA team hustle stats (LeagueHustleStatsTeam)", team_hustle,
+                                  team_field_count("hustle"),
+                                  "Season hustle totals: contested shots, deflections, charges drawn, screen "
+                                  "assists/points, loose balls recovered and box-outs. Context only."));
+    auto player_hustle = get("https://stats.nba.com/stats/leaguehustlestatsplayer?LeagueID=00&PerMode=Totals&Season=" +
+                                 season + "&SeasonType=Regular%20Season",
+                             21600, 172800);
+    if (!player_hustle.data.is_null())
+        parse_player_hustle(player_hustle.data, s, player_hustle.fetched_at);
+    s["sources"].push_back(source("nba-player-hustle", "NBA player hustle stats (LeagueHustleStatsPlayer)",
+                                  player_hustle, player_field_count("hustle"),
+                                  "Season hustle totals: contested shots, deflections, charges drawn, screen "
+                                  "assists/points, loose balls recovered and box-outs. Context only."));
+    auto team_tracking_defense =
+        get("https://stats.nba.com/stats/leaguedashptteamdefend?DefenseCategory=Overall&LeagueID=00&"
+            "PerMode=Totals&Season=" +
+                season + "&SeasonType=Regular%20Season",
+            21600, 172800);
+    if (!team_tracking_defense.data.is_null())
+        parse_team_tracking_defense(team_tracking_defense.data, s, team_tracking_defense.fetched_at);
+    s["sources"].push_back(source("nba-team-tracking-defense", "NBA team tracking defense (LeagueDashPtTeamDefend)",
+                                  team_tracking_defense, team_field_count("trackingDefense"),
+                                  "Defended field-goal % versus the shooters' normal % (PCT_PLUSMINUS "
+                                  "differential). Context for moneyline/team-total research."));
+    auto opponent_shots = get("https://stats.nba.com/stats/leaguedashoppptshot?LeagueID=00&PerMode=Totals&Season=" +
+                                  season + "&SeasonType=Regular%20Season",
+                              21600, 172800);
+    if (!opponent_shots.data.is_null())
+        parse_team_opponent_shots(opponent_shots.data, s, opponent_shots.fetched_at);
+    s["sources"].push_back(source("nba-opponent-shots", "NBA opponent shot profile (LeagueDashOppPtShot)",
+                                  opponent_shots, team_field_count("opponentShotProfile"),
+                                  "The tracking shot profile opponents record against each team (frequency, "
+                                  "FG%/eFG%, 2PT/3PT splits). Context only."));
+    auto player_tracking_shots =
+        get("https://stats.nba.com/stats/leaguedashplayerptshot?LeagueID=00&PerMode=Totals&Season=" + season +
+                "&SeasonType=Regular%20Season",
+            21600, 172800);
+    if (!player_tracking_shots.data.is_null())
+        parse_player_tracking_shots(player_tracking_shots.data, s, player_tracking_shots.fetched_at);
+    s["sources"].push_back(source("nba-player-tracking-shots", "NBA player tracking shots (LeagueDashPlayerPtShot)",
+                                  player_tracking_shots, player_field_count("trackingShooting"),
+                                  "Tracking shooting profile: attempt frequency, FG%/eFG% and 2PT/3PT "
+                                  "splits. Context beside the log-derived shooting features."));
+    auto player_tracking_defense =
+        get("https://stats.nba.com/stats/leaguedashptdefend?DefenseCategory=Overall&LeagueID=00&"
+            "PerMode=Totals&Season=" +
+                season + "&SeasonType=Regular%20Season",
+            21600, 172800);
+    if (!player_tracking_defense.data.is_null())
+        parse_player_tracking_defense(player_tracking_defense.data, s, player_tracking_defense.fetched_at);
+    s["sources"].push_back(source("nba-player-tracking-defense", "NBA player tracking defense (LeagueDashPtDefend)",
+                                  player_tracking_defense, player_field_count("trackingDefense"),
+                                  "Defended field-goal % versus the shooters' normal % (PCT_PLUSMINUS "
+                                  "differential), overall category. Context only."));
+    auto team_lineups = get("https://stats.nba.com/stats/leaguedashlineups?GroupQuantity=5&LastNGames=0&"
+                            "LeagueID=00&MeasureType=Base&PerMode=Totals&Season=" +
+                                season + "&SeasonType=Regular%20Season",
+                            21600, 172800);
+    if (!team_lineups.data.is_null())
+        parse_team_top_lineups(team_lineups.data, s, team_lineups.fetched_at);
+    s["sources"].push_back(source("nba-team-lineups", "NBA five-man lineups (LeagueDashLineups)", team_lineups,
+                                  team_field_count("topLineup"),
+                                  "Each team's most-used five-man unit (minutes, record, shooting, points "
+                                  "and plus-minus). Season context; it never confirms today's starters — "
+                                  "only the daily-lineup feed can do that."));
+    s["sources"].push_back(
+        {{"id", "nba-injury-report"},
+         {"label", "Official NBA injury report (reviewed, not auto-ingested)"},
+         {"state", "import_required"},
+         {"updatedAt", ""},
+         {"count", 0},
+         {"message", "The official report is a document/PDF surface. The awesome-nba-data source audit records "
+                     "automated requests as 403-anti-bot with no stable bulk API, so Edgecourt does not guess "
+                     "timestamped report URLs or bypass the restriction. Availability context comes from ESPN "
+                     "roster listings and the NBA daily-lineup feed; absence of a listing is never treated as "
+                     "proof a player is healthy."}});
     // Keep only players on active teams in the browser workspace. Cache retains full historical responses.
     for (auto it = s["players"].begin(); it != s["players"].end();) {
         auto team = it.value().value("team", "");

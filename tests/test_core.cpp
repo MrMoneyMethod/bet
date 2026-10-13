@@ -996,7 +996,194 @@ int main() {
         parse_team_four_factors(doc, s, now_iso());
         near(number(s["teams"]["GSW"]["fourFactors"]["efgPct"]), 0.57);
         near(number(s["teams"]["GSW"]["fourFactors"]["oppOrebPct"]), 0.27);
-        check(feature_catalog().size() == 38, "Feature catalog includes the three nba_api context feeds");
+        check(feature_catalog().size() == 53, "Feature catalog includes the nba_api + official/league context feeds");
+    });
+    test("NBA official schedule enriches existing games only, as context", [&] {
+        auto s = demo;
+        json game;
+        for (const auto &g : s["games"])
+            if (g.value("id", "") == "demo-2")
+                game = g;
+        const auto starts = game.value("startsAt", "");
+        auto doc = json::parse(
+            R"({"leagueSchedule":{"seasonYear":"2026-27","leagueId":"00","gameDates":[{"gameDate":"10/21/2026","games":[{"gameId":"0022600002","gameCode":"20261021/GSWLAL","gameDateTimeUTC":"2026-10-21T02:30:00Z","gameStatus":1,"arenaName":"Crypto.com Arena","arenaCity":"Los Angeles","arenaState":"CA","homeTeam":{"teamTricode":"LAL"},"awayTeam":{"teamTricode":"GSW"},"broadcasters":{"nationalBroadcasters":[{"broadcasterDisplay":"ESPN"}],"homeTvBroadcasters":[{"broadcasterDisplay":"Spectrum SportsNet"}]},"pointsLeaders":[{"firstName":"Stephen","lastName":"Curry","teamTricode":"GSW","points":31.2}]}]}]}})");
+        // Fixture start time must sit within the 36h match window of demo-2.
+        doc["leagueSchedule"]["gameDates"][0]["games"][0]["gameDateTimeUTC"] = starts;
+        json q;
+        for (const auto &candidate : s["quotes"])
+            if (candidate.value("market", "") == "moneyline" && candidate.value("gameId", "") == "demo-2" &&
+                candidate.value("side", "") == "home")
+                q = candidate;
+        check(!q.empty(), "Demo moneyline quote for the schedule game");
+        const double before = number(evaluate_quote(q, s)["probability"]);
+        check(before > 0 && before < 1, "Baseline moneyline probability exists before schedule enrichment");
+        parse_official_schedule(doc, s, now_iso());
+        const auto &g2 = s["games"][1];
+        check(g2.value("officialGameId", "") == "0022600002", "Official game id attached");
+        check(g2.value("arenaName", "") == "Crypto.com Arena", "Arena attached");
+        check(g2["broadcasts"]["national"].size() == 1 && g2["broadcasts"]["national"][0] == "ESPN",
+              "National broadcast attached");
+        check(g2["pointsLeaders"].size() == 1 && g2["pointsLeaders"][0]["name"] == "Stephen Curry",
+              "Points leader attached");
+        check(s["leagueContext"]["schedule"]["matchedGames"] == 1 && s["leagueContext"]["schedule"]["games"] == 1,
+              "Schedule coverage counted");
+        near(number(evaluate_quote(q, s)["probability"]), before);
+        auto empty = empty_snapshot("live");
+        parse_official_schedule(doc, empty, now_iso());
+        check(empty["games"].empty(), "Official schedule never creates slate games");
+    });
+    test("NBA daily lineups confirm only explicit starters for the first-basket guard", [&] {
+        check(daily_lineup_date_token(parse_time("2026-10-13T02:00:00Z")) == "20261012",
+              "Daily lineup token uses the Eastern game date");
+        json game;
+        for (const auto &g : demo["games"])
+            if (g.value("id", "") == "demo-2")
+                game = g;
+        const auto token = daily_lineup_date_token(parse_time(game.value("startsAt", "")));
+        auto make_doc = [](const std::string &status) {
+            std::string text_doc =
+                R"({"games":[{"gameId":"0022600002","gameStatus":1,"homeTeam":{"teamAbbreviation":"LAL","players":[{"personId":2544,"playerName":"LeBron James","lineupStatus":"LINEUP_STATUS","position":"F","rosterStatus":"Active"}]},"awayTeam":{"teamAbbreviation":"GSW","players":[{"personId":201939,"playerName":"Stephen Curry","lineupStatus":"LINEUP_STATUS","position":"G","rosterStatus":"Active"}]}}]})";
+            const auto marker = std::string("LINEUP_STATUS");
+            size_t at = 0;
+            while ((at = text_doc.find(marker, at)) != std::string::npos) {
+                text_doc.replace(at, marker.size(), status);
+                at += status.size();
+            }
+            return json::parse(text_doc);
+        };
+        auto projected = demo;
+        parse_daily_lineups(make_doc("Expected"), projected, now_iso(), token);
+        check(projected["players"][normalize_name("Stephen Curry")].value("starterConfirmed", true) == false,
+              "Expected starter never confirms and clears stale confirmation");
+        check(evaluate_quote(find_quote(projected, "first_basket", "Stephen Curry", "yes"), projected)["probability"]
+                  .is_null(),
+              "Projected lineup cannot satisfy the first-basket guard");
+        auto confirmed = demo;
+        parse_daily_lineups(make_doc("Confirmed"), confirmed, now_iso(), token);
+        check(confirmed["players"][normalize_name("Stephen Curry")].value("starterConfirmed", false),
+              "Confirmed starter satisfies the guard input");
+        check(confirmed["games"][1]["lineupSummary"]["homeConfirmed"] == 1 &&
+                  confirmed["games"][1]["lineupSummary"]["awayConfirmed"] == 1,
+              "Lineup summary counts confirmed starters");
+        auto row = evaluate_quote(find_quote(confirmed, "first_basket", "Stephen Curry", "yes"), confirmed);
+        check(!row["probability"].is_null(), "Confirmed lineup leaves the first-basket model available");
+        check(row.contains("lineupContext") && row["lineupContext"].value("confirmed", false),
+              "Panel carries same-game lineup context");
+        parse_daily_lineups(make_doc("Expected"), confirmed, now_iso(), token);
+        check(confirmed["players"][normalize_name("Stephen Curry")].value("starterConfirmed", true) == false,
+              "A later non-confirmed listing clears the confirmation");
+    });
+    test("NBA player movement stays dated context and never moves a probability", [&] {
+        auto s = demo;
+        auto doc = json::parse(
+            R"({"NBA_Player_Movement":{"rows":[{"TRANSACTION_DATE":"2026-07-15","Transaction_Type":"Signing","TRANSACTION_DESCRIPTION":"Lakers signed LeBron James.","TEAM_SLUG":"lakers","TEAM_ID":"1610612747","PLAYER_SLUG":"lebron-james","PLAYER_ID":"2544"},{"TRANSACTION_DATE":"2026-02-01","Transaction_Type":"Trade","TRANSACTION_DESCRIPTION":"Old-season row that must be dropped.","TEAM_SLUG":"lakers","TEAM_ID":"1610612747","PLAYER_SLUG":"lebron-james","PLAYER_ID":"2544"}]}})");
+        auto q = find_quote(s, "points", "LeBron James");
+        const double before = number(evaluate_quote(q, s)["probability"]);
+        parse_player_movement(doc, s, now_iso(), "2026-27");
+        check(s["transactions"].size() == 1, "Only current-season transactions retained");
+        check(s["transactions"][0]["teamAbbr"] == "LAL", "Transaction team slug mapped");
+        check(s["players"][normalize_name("LeBron James")]["latestTransaction"]["type"] == "Signing",
+              "Latest transaction attached as context");
+        auto row = evaluate_quote(q, s);
+        near(number(row["probability"]), before);
+        check(row.contains("latestTransaction"), "Panel carries transaction context");
+        auto dashboard = build_dashboard(s);
+        check(dashboard["transactions"].size() == 1 && dashboard.contains("leagueContext"),
+              "Dashboard carries the compact league desk");
+    });
+    test("Official season datasets enrich players and teams as context only", [&] {
+        auto s = demo;
+        auto result_set = [](const std::string &name, const std::string &headers, const std::string &row) {
+            return json::parse("{\"resultSets\":[{\"name\":\"" + name + "\",\"headers\":[" + headers +
+                               "],\"rowSet\":[[" + row + "]]}]}");
+        };
+        parse_player_index(result_set("PlayerIndex",
+                                      "\"PERSON_ID\",\"PLAYER_FIRST_NAME\",\"PLAYER_LAST_NAME\",\"PLAYER_SLUG\",\"TEAM_ABBREVIATION\",\"TEAM_ID\",\"TEAM_SLUG\",\"JERSEY_NUMBER\",\"POSITION\",\"HEIGHT\",\"WEIGHT\",\"COLLEGE\",\"COUNTRY\",\"DRAFT_YEAR\",\"DRAFT_ROUND\",\"DRAFT_NUMBER\",\"ROSTER_STATUS\",\"PTS\",\"REB\",\"AST\",\"IS_DEFUNCT\"",
+                                      "\"201939\",\"Stephen\",\"Curry\",\"stephen_curry\",\"GSW\",\"1610612744\",\"warriors\",\"30\",\"G\",\"6-2\",\"185\",\"Davidson\",\"USA\",\"2009\",\"1\",\"7\",1,27.6,4.4,6.5,0"),
+                           s, now_iso());
+        parse_player_clutch(result_set("PlayerClutch",
+                                       "\"PLAYER_NAME\",\"GP\",\"W\",\"L\",\"W_PCT\",\"MIN\",\"FG_PCT\",\"FG3_PCT\",\"FT_PCT\",\"REB\",\"AST\",\"TOV\",\"STL\",\"BLK\",\"PTS\",\"PLUS_MINUS\",\"NBA_FANTASY_PTS\",\"DD2\",\"TD3\"",
+                                       "\"Stephen Curry\",20,12,8,0.6,95.0,0.48,0.42,0.91,15,22,9,4,1,210,18,260.5,0,0"),
+                            s, now_iso());
+        parse_player_hustle(result_set("HustleStatsPlayer",
+                                       "\"PLAYER_NAME\",\"G\",\"MIN\",\"CONTESTED_SHOTS\",\"CONTESTED_SHOTS_2PT\",\"CONTESTED_SHOTS_3PT\",\"DEFLECTIONS\",\"CHARGES_DRAWN\",\"SCREEN_ASSISTS\",\"SCREEN_AST_PTS\",\"LOOSE_BALLS_RECOVERED\",\"OFF_LOOSE_BALLS_RECOVERED\",\"DEF_LOOSE_BALLS_RECOVERED\",\"BOX_OUTS\",\"OFF_BOXOUTS\",\"DEF_BOXOUTS\"",
+                                       "\"Stephen Curry\",55,1870,320,210,110,140,3,18,41,38,15,23,12,4,8"),
+                            s, now_iso());
+        parse_player_estimated_metrics(result_set("PlayerEstimatedMetrics",
+                                                  "\"PLAYER_NAME\",\"GP\",\"W\",\"L\",\"W_PCT\",\"MIN\",\"E_OFF_RATING\",\"E_DEF_RATING\",\"E_NET_RATING\",\"E_AST_RATIO\",\"E_OREB_PCT\",\"E_DREB_PCT\",\"E_REB_PCT\",\"E_TOV_PCT\",\"E_USG_PCT\",\"E_PACE\"",
+                                                  "\"Stephen Curry\",55,35,20,0.636,34.1,118.2,110.4,7.8,24.5,3.1,12.4,7.8,11.2,0.31,99.5"),
+                                       s, now_iso());
+        parse_player_tracking_shots(result_set("PlayerTrackingShots",
+                                               "\"PLAYER_NAME\",\"GP\",\"G\",\"PLAYER_LAST_TEAM_ABBREVIATION\",\"FGA_FREQUENCY\",\"FGM\",\"FGA\",\"FG_PCT\",\"EFG_PCT\",\"FG2A_FREQUENCY\",\"FG2M\",\"FG2A\",\"FG2_PCT\",\"FG3A_FREQUENCY\",\"FG3M\",\"FG3A\",\"FG3_PCT\"",
+                                               "\"Stephen Curry\",55,55,\"GSW\",1.0,9.8,20.1,0.487,0.582,0.52,5.1,9.9,0.515,0.48,4.7,10.2,0.408"),
+                                    s, now_iso());
+        parse_player_tracking_defense(result_set("PlayerTrackingDefense",
+                                                 "\"PLAYER_NAME\",\"GP\",\"G\",\"PLAYER_LAST_TEAM_ABBREVIATION\",\"PLAYER_POSITION\",\"FREQ\",\"D_FGM\",\"D_FGA\",\"D_FG_PCT\",\"NORMAL_FG_PCT\",\"PCT_PLUSMINUS\"",
+                                                 "\"Stephen Curry\",55,55,\"GSW\",\"G\",0.18,6.1,13.9,0.439,0.462,-0.023"),
+                                      s, now_iso());
+        parse_team_clutch(result_set("TeamClutch",
+                                     "\"TEAM_NAME\",\"TEAM_ABBREVIATION\",\"GP\",\"W\",\"L\",\"W_PCT\",\"MIN\",\"FG_PCT\",\"FG3_PCT\",\"FT_PCT\",\"REB\",\"AST\",\"TOV\",\"STL\",\"BLK\",\"PTS\",\"PLUS_MINUS\"",
+                                     "\"Golden State Warriors\",\"GSW\",25,15,10,0.6,125.0,0.47,0.4,0.8,110,80,30,15,10,560,30"),
+                          s, now_iso());
+        parse_team_hustle(result_set("HustleStatsTeam",
+                                     "\"TEAM_NAME\",\"TEAM_ABBREVIATION\",\"MIN\",\"CONTESTED_SHOTS\",\"CONTESTED_SHOTS_2PT\",\"CONTESTED_SHOTS_3PT\",\"DEFLECTIONS\",\"CHARGES_DRAWN\",\"SCREEN_ASSISTS\",\"SCREEN_AST_PTS\",\"LOOSE_BALLS_RECOVERED\",\"OFF_LOOSE_BALLS_RECOVERED\",\"DEF_LOOSE_BALLS_RECOVERED\",\"BOX_OUTS\",\"OFF_BOXOUTS\",\"DEF_BOXOUTS\"",
+                                     "\"Golden State Warriors\",\"GSW\",12000,2600,1700,900,1250,25,480,1050,300,120,180,900,350,550"),
+                          s, now_iso());
+        parse_team_estimated_metrics(result_set("TeamEstimatedMetrics",
+                                                "\"TEAM_NAME\",\"GP\",\"W\",\"L\",\"W_PCT\",\"MIN\",\"E_OFF_RATING\",\"E_DEF_RATING\",\"E_NET_RATING\",\"E_PACE\",\"E_AST_RATIO\",\"E_OREB_PCT\",\"E_DREB_PCT\",\"E_REB_PCT\",\"E_TM_TOV_PCT\"",
+                                                "\"Golden State Warriors\",55,35,20,0.636,2640,117.1,111.3,5.8,99.8,26.1,24.5,72.1,48.3,0.125"),
+                                     s, now_iso());
+        parse_team_tracking_defense(result_set("TeamTrackingDefense",
+                                               "\"TEAM_NAME\",\"TEAM_ABBREVIATION\",\"GP\",\"G\",\"FREQ\",\"D_FGM\",\"D_FGA\",\"D_FG_PCT\",\"NORMAL_FG_PCT\",\"PCT_PLUSMINUS\"",
+                                               "\"Golden State Warriors\",\"GSW\",55,55,1.0,41.2,88.5,0.466,0.471,-0.005"),
+                                    s, now_iso());
+        parse_team_opponent_shots(result_set("TeamOpponentShots",
+                                             "\"TEAM_NAME\",\"TEAM_ABBREVIATION\",\"GP\",\"G\",\"FGA_FREQUENCY\",\"FGM\",\"FGA\",\"FG_PCT\",\"EFG_PCT\",\"FG2_PCT\",\"FG3_PCT\"",
+                                             "\"Golden State Warriors\",\"GSW\",55,55,1.0,40.9,87.9,0.465,0.531,0.512,0.358"),
+                                  s, now_iso());
+        auto lineups = json::parse(
+            R"({"resultSets":[{"name":"Lineups","headers":["TEAM_NAME","TEAM_ABBREVIATION","GROUP_NAME","GROUP_ID","GP","W","L","W_PCT","MIN","FG_PCT","FG3_PCT","FT_PCT","REB","AST","TOV","STL","BLK","PTS","PLUS_MINUS"],"rowSet":[["Golden State Warriors","GSW","Unit A","111",40,25,15,0.625,300.0,0.49,0.4,0.8,180,120,50,20,10,480,45],["Golden State Warriors","GSW","Unit B","222",50,30,20,0.6,512.5,0.47,0.38,0.79,210,140,60,22,12,560,38]]}]})");
+        parse_team_top_lineups(lineups, s, now_iso());
+        check(s["players"][normalize_name("Stephen Curry")]["playerIndex"]["personId"] == "201939",
+              "PlayerIndex crosswalk attached");
+        check(s["players"][normalize_name("Stephen Curry")]["clutch"]["pts"] == 210, "Player clutch totals");
+        check(s["players"][normalize_name("Stephen Curry")]["hustle"]["deflections"] == 140,
+              "Player hustle season totals");
+        near(number(s["players"][normalize_name("Stephen Curry")]["estimatedMetrics"]["eNetRating"]), 7.8);
+        near(number(s["teams"]["GSW"]["topLineup"]["minutesPerGame"]), 10.25);
+        check(s["teams"]["GSW"]["topLineup"]["groupName"] == "Unit B", "Most-used lineup kept");
+        auto q = find_quote(s, "points", "Stephen Curry");
+        const double before = number(evaluate_quote(q, demo)["probability"]);
+        auto row = evaluate_quote(q, s);
+        near(number(row["probability"]), before);
+        check(row.contains("playerProfile") && row["playerProfile"]["height"] == "6-2",
+              "Panel carries the PlayerIndex profile");
+        for (const auto &label : {"Height", "Clutch points", "Season deflections", "Estimated net rating",
+                                  "Tracking eFG %", "Defended FG differential"}) {
+            bool seen = false;
+            for (const auto &f : row["features"])
+                if (f.value("label", "") == label && f.value("role", "") == "context")
+                    seen = true;
+            check(seen, std::string("Context feature shown: ") + label);
+        }
+        json mlq;
+        for (const auto &candidate : s["quotes"])
+            if (candidate.value("market", "") == "moneyline" && candidate.value("gameId", "") == "demo-2" &&
+                candidate.value("side", "") == "home")
+                mlq = candidate;
+        auto ml = evaluate_quote(mlq, s);
+        bool team_seen = false;
+        for (const auto &f : ml["features"])
+            if (f.value("label", "").find("estimated net rating") != std::string::npos &&
+                f.value("role", "") == "context")
+                team_seen = true;
+        check(team_seen, "Team estimated metrics shown as context on moneyline");
+        auto dashboard = build_dashboard(s);
+        bool carried = false;
+        for (const auto &t : dashboard["teams"])
+            if (t.value("abbr", "") == "GSW" && t.contains("estimatedMetrics") && t.contains("topLineup"))
+                carried = true;
+        check(carried, "Dashboard carries compact team league context");
     });
     test("New keyless price hosts are allowlisted and lookalikes are not", [] {
         check(allowed_data_url("https://gamma-api.polymarket.com/events?tag_slug=nba"), "Polymarket");

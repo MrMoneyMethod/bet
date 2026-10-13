@@ -246,3 +246,18 @@ main{flex:1;min-width:0;padding:20px 30px 0;max-width:1900px;margin:0 auto}.mode
 [data-theme="dark"] .debug-repeat{background:#1a2742;color:#8fa0b8}
 @media(max-width:900px){.debug-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.debug-actions{margin-left:0}}
 @media(max-width:650px){.topbar{gap:6px;padding:0 10px}.brand{font-size:19px}.primary-nav{gap:7px}.primary-nav>button{font-size:9px;gap:3px}#health-label{display:none}.debug-entry{flex-direction:column;gap:7px}}
+
+/* Official league desk + panel context (NBA.com / NBA Stats additions). */
+.official-context{margin-top:10px;padding:9px 11px;border:1px solid #26322c;border-radius:10px;background:#101613;color:#c8d3c4;font-size:11.5px;line-height:1.55}
+.league-desk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:14px 0 8px}
+.league-desk-tile{border:1px solid #26322c;border-radius:12px;background:#101613;padding:12px 14px;display:flex;flex-direction:column;gap:4px}
+.league-desk-tile span{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#8fa184}
+.league-desk-tile strong{font-size:22px;color:#e8f0e2}
+.league-desk-tile small{color:#98a493;font-size:11px}
+.league-desk-subtitle{margin:16px 0 10px;font-size:13px;color:#dfe8da}
+.transaction-list{display:flex;flex-direction:column;gap:8px}
+.transaction-row{display:flex;gap:12px;padding:9px 11px;border:1px solid #26322c;border-radius:10px;background:#101613}
+.transaction-date{color:#8fa184;font-size:11px;white-space:nowrap;padding-top:2px;min-width:78px}
+.transaction-row strong{display:block;color:#e8f0e2;font-size:12.5px}
+.transaction-row span{color:#98a493;font-size:11px}
+.transaction-row p{color:#c8d3c4;font-size:11.5px;margin:2px 0 0}
