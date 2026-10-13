@@ -17,6 +17,10 @@ struct FeedResponse {
 };
 bool allowed_data_url(const std::string &url);
 HttpResponse public_get(const std::string &url);
+// One scoreboard URL per UTC day. ESPN's site API now rejects hyphenated
+// `dates=YYYYMMDD-YYYYMMDD` ranges with HTTP 400, so a window is fetched as
+// single-day requests and merged by event id. Never returns a ranged URL.
+std::vector<std::string> espn_scoreboard_day_urls(long long first_epoch, long long last_epoch);
 json nba_rows(const json &document);
 void parse_espn_scoreboard(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_nba_scoreboard(const json &document, json &snapshot, const std::string &fetched_at);

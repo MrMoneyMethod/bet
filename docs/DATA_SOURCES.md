@@ -6,8 +6,8 @@ No API keys or sportsbook credentials are requested. Keyless public access is no
 
 | Source | Request family | Inputs | Cache / fallback |
 |---|---|---|---|
-| ESPN site API | `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=YYYYMMDD-YYYYMMDD&limit=100` | Yesterday through next 7 days: event IDs, teams, schedules, season type, scores, clock, venue, record, explicit moneyline fields when present | 45 seconds; no stale scoreboard fallback |
-| ESPN public HTML fallback | `https://www.espn.com/nba/scoreboard` | Embedded event JSON / explicit moneylines; current day only | Only after JSON 404 or a successful unsupported JSON contract, never after access/rate-limit denial |
+| ESPN site API | `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=YYYYMMDD&limit=100`, one request per day | Yesterday through next 7 days: event IDs, teams, schedules, season type (preseason / regular / postseason kept as published), scores, clock, venue, record, explicit moneyline fields when present. Hyphenated `dates=YYYYMMDD-YYYYMMDD` ranges now return HTTP 400, so they are never requested | 45 seconds per day; no stale scoreboard fallback; a day that fails is reported as a partial source, never backfilled |
+| ESPN public HTML fallback | `https://www.espn.com/nba/scoreboard` | Embedded event JSON / explicit moneylines; current day only | Only when no daily JSON response follows the known contract, never after access/rate-limit denial (403/429) |
 | NBA CDN | `https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json` | Today's live scores, period, clock, NBA game ID | 30 seconds; no stale fallback; matches merged with ESPN by teams/start date |
 | NBA stats | `https://stats.nba.com/stats/playergamelogs?...` | Recent player minutes, points, rebounds, assists, threes, steals, blocks, shooting volume/efficiency, turnovers, fouls, offensive rebounds | 6 hours; at most 48-hour explicit historical cache fallback |
 | NBA stats | `https://stats.nba.com/stats/leaguedashteamstats?...MeasureType=Advanced...` | Team pace, offense/defense/net rating | 6 hours; at most 48-hour cache fallback |
@@ -44,7 +44,7 @@ The native historical/model workspace can be opened with `--live --offline` to d
 
 ## Scraping implemented
 
-A fixed public ESPN scoreboard-page fallback is requested automatically only when its JSON endpoint returns 404 or a successful unsupported response format. It is **not attempted after 403/429/network denial** and is not a challenge bypass. It extracts embedded data from that one public page, not protected bookmaker pages. The same bounded parser is available for locally saved HTML.
+A fixed public ESPN scoreboard-page fallback is requested automatically only when no daily JSON response follows the known scoreboard contract. It is **not attempted after 403/429/network denial** and is not a challenge bypass. It extracts embedded data from that one public page, not protected bookmaker pages. The same bounded parser is available for locally saved HTML.
 
 Saved ESPN HTML price imports require an explicit original observation timestamp; file import time is not used to make old prices fresh. The automatic public-page fallback uses the actual HTTPS retrieval timestamp, still labeled indicative rather than a book-last-move time.
 
@@ -63,7 +63,7 @@ The historical SBR reference was reviewed for data/odds separation and parsing p
 - HTTPS GET only to a fixed source hostname allowlist; no custom ports, credentials, localhost targets or redirects.
 - Descriptive application user agent; Windows certificate validation remains enabled.
 - Timeouts, 16 MB source-response cap, 4 MB imports, 36 network requests per refresh maximum and at least 250 ms between source requests.
-- Cache avoids refetching season stats/rosters every score refresh.
+- Cache avoids refetching season stats/rosters every score refresh. Within the request budget, the schedule and the public moneyline venues are fetched before player/team stats, live summaries and rosters, so enrichment traffic cannot starve prices.
 - Failed/blocked/rate-limited sources are surfaced in **Model lab → Data sources**. The code does not retry through bypasses.
 - Desktop public-data requests originate on your computer, not in browser JavaScript, avoiding provider CORS requirements.
 - Model price/stat freshness is stricter than cache availability. A cached history response does not make an old price fresh.

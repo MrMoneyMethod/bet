@@ -850,6 +850,102 @@ int main() {
         auto r = evaluate_quote(s["quotes"][1], s);
         near(number(r["oddsPercent"]), 100 * implied_probability(-140));
     });
+    test("ESPN scoreboard URLs are single-day, never a rejected date range", [] {
+        const auto urls = espn_scoreboard_day_urls(parse_time("2026-10-12T15:00:00Z"),
+                                                   parse_time("2026-10-20T02:00:00Z"));
+        check(urls.size() == 9, "Yesterday through next seven days, inclusive");
+        check(urls.front().find("dates=20261012&") != std::string::npos, "First day");
+        check(urls.back().find("dates=20261020&") != std::string::npos, "Last day");
+        for (const auto &url : urls) {
+            const auto dates = url.substr(url.find("dates=") + 6);
+            check(dates.size() == 8 + std::string("&limit=100").size() &&
+                      dates.find('-') == std::string::npos,
+                  "Hyphenated ranges return HTTP 400 and must never be built");
+            check(allowed_data_url(url), "Day URL stays on the allowlist");
+        }
+        check(espn_scoreboard_day_urls(parse_time("2026-10-20T00:00:00Z"),
+                                       parse_time("2026-10-12T00:00:00Z"))
+                  .empty(),
+              "Reversed window is empty");
+        check(espn_scoreboard_day_urls(parse_time("2026-10-01T00:00:00Z"),
+                                       parse_time("2026-11-30T00:00:00Z"))
+                      .size() <= 14,
+              "Window is hard-capped");
+    });
+    test("ESPN preseason and postseason games stay in the data with their prices", [&] {
+        auto fixture = espn_fixture();
+        fixture["events"][0]["season"]["type"] = 1;
+        auto s = empty_snapshot("live");
+        parse_espn_scoreboard(fixture, s, now_iso());
+        check(s["games"].size() == 1 && s["games"][0]["seasonType"] == "preseason", "Preseason typing");
+        check(s["quotes"].size() == 2, "Preseason moneylines are kept");
+        auto dashboard = build_dashboard(s);
+        check(dashboard["games"].size() == 1 && dashboard["summary"]["quotes"] == 2,
+              "Preseason game reaches the dashboard");
+        const auto &row = dashboard["markets"][0];
+        check(!row["oddsPercent"].is_null(), "Preseason price stays visible as Odds %");
+        check(row["probability"].is_null() &&
+                  row.value("reason", "").find("Preseason") != std::string::npos,
+              "Preseason projections remain guarded, not hidden");
+        fixture["events"][0]["season"] = {{"type", 3}};
+        s = empty_snapshot("live");
+        parse_espn_scoreboard(fixture, s, now_iso());
+        check(s["games"][0]["seasonType"] == "playoffs", "Postseason is not mislabeled regular");
+        fixture["events"][0]["season"] = {{"slug", "preseason"}};
+        s = empty_snapshot("live");
+        parse_espn_scoreboard(fixture, s, now_iso());
+        check(s["games"][0]["seasonType"] == "preseason", "Season slug fallback");
+    });
+    test("NBA CDN game-id prefixes type preseason and playoff games", [] {
+        for (const auto &item : std::vector<std::pair<std::string, std::string>>{
+                 {"0012600001", "preseason"}, {"0022600001", "regular"}, {"0042600001", "playoffs"}}) {
+            auto s = empty_snapshot("live");
+            json fixture = {
+                {"scoreboard",
+                 {{"games", json::array({{{"gameId", item.first},
+                                          {"gameTimeUTC", iso_at(parse_time(now_iso()) + 86400)},
+                                          {"gameStatus", 1},
+                                          {"period", 0},
+                                          {"gameClock", ""},
+                                          {"homeTeam", {{"teamTricode", "GSW"}, {"score", 0}}},
+                                          {"awayTeam", {{"teamTricode", "NYK"}, {"score", 0}}}}})}}}};
+            parse_nba_scoreboard(fixture, s, now_iso());
+            check(s["games"].size() == 1 && s["games"][0]["seasonType"] == item.second,
+                  "NBA CDN season type for " + item.first);
+        }
+    });
+    test("Public moneylines match preseason schedule games", [&] {
+        auto s = empty_snapshot("live");
+        const auto start = iso_at(parse_time(now_iso()) + 86400);
+        s["games"].push_back({{"id", "g-pre"},
+                              {"home", "LAL"},
+                              {"away", "GSW"},
+                              {"startsAt", start},
+                              {"seasonType", "preseason"}});
+        json doc = json::array({{{"slug", "nba-gsw-lal-pre"},
+                                 {"markets", json::array({{{"active", true},
+                                                           {"closed", false},
+                                                           {"sportsMarketType", "moneyline"},
+                                                           {"outcomes", "[\"Golden State Warriors\", \"Los Angeles Lakers\"]"},
+                                                           {"outcomePrices", "[\"0.42\", \"0.58\"]"},
+                                                           {"endDate", start}}})}}});
+        parse_polymarket_events(doc, s, now_iso());
+        check(s["quotes"].size() == 2, "Preseason moneyline pair matched to the schedule");
+        auto row = evaluate_quote(s["quotes"][0], s);
+        check(!row["oddsPercent"].is_null() && row["probability"].is_null(),
+              "Preseason price is displayed while the projection stays guarded");
+    });
+    test("Imported games accept preseason/playoffs and reject unknown season types", [] {
+        json game = {{"id", "g-import-pre"},
+                     {"home", "GSW"},
+                     {"away", "NYK"},
+                     {"startsAt", now_iso()},
+                     {"seasonType", "preseason"}};
+        auto validated = validate_import({{"games", json::array({game})}});
+        check(validated["games"][0]["seasonType"] == "preseason", "Preseason import kept");
+        game["seasonType"] = "exhibition";
+        throws([&] { validate_import({{"games", json::array({game})}}); });
+    });
     test("New keyless price hosts are allowlisted and lookalikes are not", [] {
         check(allowed_data_url("https://gamma-api.polymarket.com/events?tag_slug=nba"), "Polymarket");
         check(allowed_data_url("https://external-api.kalshi.com/trade-api/v2/markets"), "Kalshi");

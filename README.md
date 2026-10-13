@@ -31,7 +31,8 @@ This is a **working experimental baseline**, not a proven profitable or calibrat
 
 ## Features
 
-- Upcoming and live NBA schedule, scores, clock and explicit public moneylines, shown as percentages on schedule cards, market rows, research panels and CSV exports.
+- Upcoming and live NBA schedule — preseason, regular-season and postseason games kept as published — with scores, clock and explicit public moneylines, shown as percentages on schedule cards, market rows, research panels and CSV exports. ESPN's scoreboard is fetched one day at a time (its hyphenated date ranges now return HTTP 400), and the public moneyline venues are fetched before stats enrichment so the shared request budget cannot starve them.
+- **Dark mode:** the moon/sun button in the header switches instantly, Settings → Appearance offers System / Light / Dark, and the choice is saved only in this browser. System follows your OS setting until you choose otherwise.
 - Optional all-discovered-season NBA play-by-play archive: SQLite/gzipped raw pages outside Git, paired box-score vectors, dated first-FG opportunities, streaming native feature loading, coverage/gap reporting and atomic local reload.
 - All requested market types: **moneyline; points, rebounds, assists, 3PM O/U; PRA; double-double; triple-double; first basket; team totals O/U**.
 - Joint weighted empirical-bootstrap player predictions, transparent moneyline/team-total baselines, push-aware EV and same-book matched no-vig comparisons.
@@ -123,7 +124,7 @@ This builds `releases/Edgecourt.exe` with static C++ runtime libraries; remainin
 
 ## Tests and validation
 
-- **58 C++ test cases** and **17 offline historical collector tests**; `edgecourt_tests` reports the current count.
+- **71 C++ test cases** and **19 offline historical collector tests**; `edgecourt_tests` reports the current count.
 - Native historical pipeline test: synthetic saved pages → complete event archive → feature export → live/offline native estimates, dated first-FG counts, current lineup import, atomic reload and removed-bundle cleanup.
 - Native-process API tests: assets, Host/Origin/token guards, synthetic isolation, imports, deduplication, atomic failures, CSV templates and refresh.
 - Browser interaction tests: categories/search/EV/game/status filters, watchlist, imports/errors, XSS escaping, export, pagination, settings, model lab and mobile layout.

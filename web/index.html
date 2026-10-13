@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#ffffff">
+  <meta name="theme-color" id="theme-color-meta" content="#ffffff">
+  <meta name="color-scheme" content="light dark">
   <meta name="description" content="Edgecourt — a local, transparent NBA market research workspace.">
   <title>Edgecourt · NBA market research</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -14,7 +15,7 @@
   <header class="topbar">
     <a class="brand" href="/" aria-label="Edgecourt home"><span class="brand-mark"><i></i><i></i><i></i></span><span>edgecourt<span class="brand-period">.</span></span></a>
     <nav class="primary-nav" aria-label="Workspace"><button class="active" data-view="markets">Markets</button><button data-view="watchlist">Watchlist <span id="watch-count" class="nav-count">0</span></button><button data-view="lab">Model lab <span class="beta-label">BETA</span></button></nav>
-    <div class="header-actions"><button id="health-button" class="health-button" title="View data sources"><span class="health-dot"></span><span id="health-label">Demo workspace</span></button><button id="settings-button" class="icon-button" title="Settings" aria-label="Open settings" data-icon="settings"></button><span class="profile-avatar" title="Local workspace">EC</span></div>
+    <div class="header-actions"><button id="health-button" class="health-button" title="View data sources"><span class="health-dot"></span><span id="health-label">Demo workspace</span></button><button id="theme-toggle" class="icon-button" title="Switch to dark mode" aria-label="Switch to dark mode" aria-pressed="false" data-icon="moon"></button><button id="settings-button" class="icon-button" title="Settings" aria-label="Open settings" data-icon="settings"></button><span class="profile-avatar" title="Local workspace">EC</span></div>
   </header>
   <div class="app-layout">
     <aside class="sidebar">
@@ -74,6 +75,7 @@
   </dialog>
   <dialog id="settings-dialog" class="modal settings-modal">
     <div class="modal-heading"><div><div class="eyebrow">LOCAL WORKSPACE</div><h2>Your research settings</h2></div><button class="icon-button" data-close="settings-dialog" aria-label="Close settings" data-icon="x"></button></div>
+    <label class="settings-field">Appearance<select id="theme-input"><option value="system">Use system setting</option><option value="light">Light</option><option value="dark">Dark</option></select><small>Dark mode follows this browser only. The moon/sun button in the header switches instantly; your choice is saved in this browser.</small></label>
     <label class="settings-field">Illustrative bankroll ($)<input id="bankroll-input" type="number" min="1" max="1000000000" step="1" value="1000"><small>Used only for the optional fractional-Kelly illustration. No bets are placed.</small></label>
     <label class="checkbox-label sizing-opt"><input id="sizing-input" type="checkbox">Show experimental stake-sizing illustration</label>
     <div class="settings-info"><span data-icon="shield"></span><div><strong>Private by default</strong><p>Your Windows executable listens on 127.0.0.1. Saved imports live in <code>%LOCALAPPDATA%\Edgecourt</code>. Browser preferences stay in this browser.</p></div></div>

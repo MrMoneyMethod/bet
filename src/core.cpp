@@ -1445,7 +1445,10 @@ json validate_import(const json &document) {
                 throw std::invalid_argument("Invalid game status");
             g["status"] = status;
             g["source"] = "user_import";
-            g["seasonType"] = g.value("seasonType", "regular");
+            const auto season_type = g.value("seasonType", "regular");
+            if (season_type != "preseason" && season_type != "regular" && season_type != "playoffs")
+                throw std::invalid_argument("seasonType must be preseason, regular or playoffs");
+            g["seasonType"] = season_type;
             if (status == "live") {
                 require_number(g, "elapsedMinutes", 0, 80);
                 require_number(g, "period", 1, 10);

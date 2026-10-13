@@ -34,7 +34,9 @@ const icons = {
   database:'<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/>',
   activity:'<path d="M2 12h5l3-9 4 18 3-9h5"/>',
   code:'<path d="M8 5l-6 7 6 7M16 5l6 7-6 7M14 3l-4 18"/>',
-  warning:'<path d="M12 3L2 21h20zM12 9v5m0 3v.1"/>'
+  warning:'<path d="M12 3L2 21h20zM12 9v5m0 3v.1"/>',
+  moon:'<path d="M20 13.5A8.5 8.5 0 1110.5 4a7 7 0 009.5 9.5z"/>',
+  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'
 };
 const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.grid}</svg>`;
 function hydrateIcons(root = document) { $$('[data-icon]', root).forEach(el => { el.innerHTML = icon(el.dataset.icon); }); }
@@ -68,6 +70,26 @@ const isPlayer = market => !['moneyline','team_total'].includes(market);
 const nowISO = () => new Date().toISOString().replace(/\.\d{3}Z$/,'Z');
 const readPreference = (key, fallback) => { try { const value=localStorage.getItem(`edgecourt.${key}`); return value==null ? fallback : JSON.parse(value); } catch { return fallback; } };
 const storePreference = (key, value) => { try { localStorage.setItem(`edgecourt.${key}`,JSON.stringify(value)); } catch {} };
+// Appearance: 'system' (default) follows the OS, 'light'/'dark' are explicit.
+// The effective theme lives on <html data-theme> so styles.css can theme every
+// surface; only the preference is persisted, in this browser.
+const themeMedia=window.matchMedia('(prefers-color-scheme: dark)');
+const storedTheme=readPreference('theme','system');
+let themePreference=['light','dark','system'].includes(storedTheme)?storedTheme:'system';
+let theme=themePreference==='system'?(themeMedia.matches?'dark':'light'):themePreference;
+function applyTheme() {
+  theme=themePreference==='system'?(themeMedia.matches?'dark':'light'):themePreference;
+  document.documentElement.dataset.theme=theme;
+  document.documentElement.dataset.themePreference=themePreference;
+  document.documentElement.style.colorScheme=theme;
+  const meta=$('#theme-color-meta');if(meta)meta.content=theme==='dark'?'#0b1220':'#ffffff';
+  const toggle=$('#theme-toggle');
+  if(toggle){toggle.innerHTML=icon(theme==='dark'?'sun':'moon');toggle.dataset.icon=theme==='dark'?'sun':'moon';toggle.title=theme==='dark'?'Switch to light mode':'Switch to dark mode';toggle.setAttribute('aria-label',toggle.title);toggle.setAttribute('aria-pressed',String(theme==='dark'));}
+  const select=$('#theme-input');if(select)select.value=themePreference;
+}
+function setThemePreference(preference) { themePreference=['light','dark','system'].includes(preference)?preference:'system';storePreference('theme',themePreference);applyTheme(); }
+themeMedia.addEventListener?.('change',()=>{if(themePreference==='system')applyTheme();});
+applyTheme();
 const savedPref=readPreference('saved',[]);
 const state = {data:null,token:'',view:'markets',category:'all',time:'all',gameId:'',query:'',book:'',evOnly:false,minEv:0,includeUnpriced:false,sort:'ev',page:0,pageSize:8,selected:'',saved:new Set(Array.isArray(savedPref)?savedPref.filter(x=>typeof x==='string'):[]),bankroll:readPreference('bankroll',1000),showSizing:readPreference('showSizing',false),loading:false,lastMode:''};
 let toastTimer, pollTimer;
@@ -90,6 +112,7 @@ async function getState(silent=false) {
     if(!silent || !state.data){$('#loading-overlay').classList.add('hidden');$('#connection-banner').textContent=`Can't reach the local C++ server. Keep the executable window open, then reload. ${error.message}`;$('#connection-banner').classList.remove('hidden');}
   }finally{state.loading=false;}
 }
+const seasonSuffix = g => g?.seasonType==='preseason'?' · Preseason':g?.seasonType==='playoffs'?' · Playoffs':'';
 function localStart(date) {
   const d=new Date(date);if(Number.isNaN(d.getTime()))return 'Time unavailable';
   const today=new Date();const same=d.toDateString()===today.toDateString();
@@ -178,7 +201,7 @@ function renderGames() {
     const isLive=g.status==='live';
     const quote=side=>state.data.markets.find(m=>m.gameId===g.id && m.market==='moneyline' && m.side===side && m.oddsPercent!=null && m.freshness==='fresh');
     const teamRow=side=>{const q=quote(side);return `<div class="game-team"><span class="team-badge" style="${teamStyle(g[side])}">${esc(g[side])}</span><strong>${esc(g[`${side}Name`] || g[side])}</strong><span class="game-odds" title="Bookmaker implied probability, including margin">${odds(q?.oddsPercent)}</span>${isLive?`<span class="game-score">${g[`${side}Score`]||0}</span>`:''}</div>`;};
-    return `<button class="game-card ${state.gameId===g.id?'selected':''}" data-game="${esc(g.id)}" title="Filter to this matchup" aria-pressed="${state.gameId===g.id}"><div class="game-meta"><span class="status-pill ${isLive?'live':''}">${isLive?'<i class="live-dot"></i>':''}${state.data.mode==='demo' && isLive?'SIMULATED LIVE':isLive?'LIVE':g.status==='upcoming'?'UPCOMING':esc(g.status.toUpperCase())}</span><span>${isLive?`Q${g.period} · ${esc(g.clock)}`:esc(localStart(g.startsAt))}</span></div>${teamRow('away')}${teamRow('home')}<div class="game-bottom"><span>${esc(g.venue || 'NBA · Full game')}${g.seasonType==='preseason'?' · Preseason':''}</span>${icon('arrowUpRight')}</div></button>`;
+    return `<button class="game-card ${state.gameId===g.id?'selected':''}" data-game="${esc(g.id)}" title="Filter to this matchup" aria-pressed="${state.gameId===g.id}"><div class="game-meta"><span class="status-pill ${isLive?'live':''}">${isLive?'<i class="live-dot"></i>':''}${state.data.mode==='demo' && isLive?'SIMULATED LIVE':isLive?'LIVE':g.status==='upcoming'?'UPCOMING':esc(g.status.toUpperCase())}</span><span>${isLive?`Q${g.period} · ${esc(g.clock)}`:esc(localStart(g.startsAt))}</span></div>${teamRow('away')}${teamRow('home')}<div class="game-bottom"><span>${esc(g.venue || 'NBA · Full game')}${g.seasonType==='preseason'?' · Preseason':g.seasonType==='playoffs'?' · Playoffs':''}</span>${icon('arrowUpRight')}</div></button>`;
   }).join(''):`<div class="game-empty"><strong>${state.data.refreshing?'Connecting to public NBA sources…':state.view==='watchlist'?'Save a market to follow its matchup.':'No games available in this view.'}</strong>${state.data.refreshing?'Public sources can be slow or blocked. The app will not substitute fictional games.':state.data.mode==='live'?'Check Model lab → Data sources. You can also import a schedule and your own feature history.':'Change the status filter to see more demo matchups.'}</div>`;
 }
 function renderBooks() {
@@ -202,7 +225,7 @@ function renderRows() {
     const live=m.game?.status==='live';const selected=state.selected===m.id;
     const ev=m.ev==null?`<span class="ev-chip neutral" title="${esc(m.reason || 'Current price or model inputs unavailable')}">${m.freshness==='stale'?'Stale':'—'}</span>`:`<span class="ev-chip ${m.ev>0?'':'negative'}">${m.ev>0?icon('trend'):''}${signed(m.ev)}%</span>`;
     const avatar=m.player?initials(m.player):m.team;
-    return `<tr class="${selected?'selected':''}" data-market="${esc(m.id)}" tabindex="0" aria-label="Inspect ${esc(title)} ${esc(selectionLabel(m))}"><td><div class="market-cell"><span class="player-avatar" style="${teamStyle(m.team)}">${esc(avatar)}</span><div class="market-identity"><div class="market-name">${esc(title)}</div><div class="market-line">${live?'<i class="tiny-status"></i>':''}<span>${esc(shortLabels[m.market])}</span><span>·</span><span class="line-value">${m.market==='moneyline'?'Full game':esc(m.side==='yes'?'Yes':m.side==='no'?'No':`${m.side==='over'?'O':'U'} ${m.line==null?'—':num(m.line,Number.isInteger(m.line)?0:1)}`)}</span></div></div></div></td><td><div class="matchup-label">${esc(m.matchup || '—')}<small>${live?`Q${m.game.period} · ${esc(m.game.clock)}`:esc(localStart(m.game?.startsAt))}</small></div></td><td><div class="price-value" title="Bookmaker implied probability, including margin">${odds(m.oddsPercent)}</div><div class="book-label" title="${esc(m.book)}">${esc(m.book)}</div></td><td><div class="model-value">${pct(m.probability)}</div><div class="model-sub">${m.probability==null?'Missing inputs':'experimental'}</div></td><td>${ev}</td><td><button class="watch-button ${state.saved.has(m.id)?'saved':''}" data-save="${esc(m.id)}" title="${state.saved.has(m.id)?'Unsave':'Save'} market" aria-label="${state.saved.has(m.id)?'Unsave':'Save'} ${esc(title)}" aria-pressed="${state.saved.has(m.id)}">${icon('star')}</button></td></tr>`;
+    return `<tr class="${selected?'selected':''}" data-market="${esc(m.id)}" tabindex="0" aria-label="Inspect ${esc(title)} ${esc(selectionLabel(m))}"><td><div class="market-cell"><span class="player-avatar" style="${teamStyle(m.team)}">${esc(avatar)}</span><div class="market-identity"><div class="market-name">${esc(title)}</div><div class="market-line">${live?'<i class="tiny-status"></i>':''}<span>${esc(shortLabels[m.market])}</span><span>·</span><span class="line-value">${m.market==='moneyline'?'Full game':esc(m.side==='yes'?'Yes':m.side==='no'?'No':`${m.side==='over'?'O':'U'} ${m.line==null?'—':num(m.line,Number.isInteger(m.line)?0:1)}`)}</span></div></div></div></td><td><div class="matchup-label">${esc(m.matchup || '—')}<small>${live?`Q${m.game.period} · ${esc(m.game.clock)}`:esc(localStart(m.game?.startsAt))}${esc(seasonSuffix(m.game))}</small></div></td><td><div class="price-value" title="Bookmaker implied probability, including margin">${odds(m.oddsPercent)}</div><div class="book-label" title="${esc(m.book)}">${esc(m.book)}</div></td><td><div class="model-value">${pct(m.probability)}</div><div class="model-sub">${m.probability==null?'Missing inputs':'experimental'}</div></td><td>${ev}</td><td><button class="watch-button ${state.saved.has(m.id)?'saved':''}" data-save="${esc(m.id)}" title="${state.saved.has(m.id)?'Unsave':'Save'} market" aria-label="${state.saved.has(m.id)?'Unsave':'Save'} ${esc(title)}" aria-pressed="${state.saved.has(m.id)}">${icon('star')}</button></td></tr>`;
   }).join('');
   $('#empty-state').classList.toggle('hidden',rows.length>0);
   if(!rows.length){const watch=state.view==='watchlist';$('#empty-state').innerHTML=`<span>${icon(watch?'bookmark':'search')}</span><h3>${watch && !state.saved.size?'A little research worth saving.':'No markets match this view.'}</h3><p>${watch && !state.saved.size?'Tap the star beside a market to keep it here. Prices can change; saved does not mean locked.':state.data.mode==='live' && !state.data.summary.quotes?'Public sources have not returned usable prices. Import current odds or enable “Include unpriced markets” to inspect coverage.':'Try a different category, game or filter. Positive estimated EV still requires current prices and complete model inputs.'}</p><button class="button button-outline" data-empty-action="${watch && !state.saved.size?'markets':'reset'}">${watch && !state.saved.size?'Explore markets':'Reset filters'} ${icon('arrowRight')}</button>`;}
@@ -222,7 +245,7 @@ function renderPanel() {
   const preview=(m.features||[]).filter(f=>f.role==='used').slice(0,4);
   const warnings=m.caveats || [];
   panel.innerHTML=`<div class="research-head"><span class="eyebrow">THE RESEARCH DESK</span><span class="experimental-pill">EXPERIMENTAL</span></div>
-    <div class="research-identity"><span class="player-avatar" style="${teamStyle(m.team)}">${esc(m.player?initials(m.player):m.team)}</span><div><h3>${esc(name)}</h3><p>${esc(m.matchup || '')} · ${m.game?.status==='live'?'In play':esc(localStart(m.game?.startsAt))}</p></div></div>
+    <div class="research-identity"><span class="player-avatar" style="${teamStyle(m.team)}">${esc(m.player?initials(m.player):m.team)}</span><div><h3>${esc(name)}</h3><p>${esc(m.matchup || '')} · ${m.game?.status==='live'?'In play':esc(localStart(m.game?.startsAt))}${esc(seasonSuffix(m.game))}</p></div></div>
     <div class="research-selection"><span>${esc(selectionLabel(m))}</span><span title="Bookmaker implied probability, including margin">${odds(m.oddsPercent)}</span></div>
     <div class="research-quote-meta"><span>${esc(m.book)}</span><span class="research-price-age ${fresh?'':'stale'}">${m.oddsPercent==null?'No quote':esc(ageLabel(m.observedAt))}</span></div>
     ${available?`<div class="projection-block"><div class="projection-caption">${esc(m.projectionLabel || 'Model projection')}</div><div class="projection-value">${num(m.projected)}<small>${percentProjection?'%':m.market==='moneyline'?'pts margin':'projected'}</small></div>${samples}<div class="probability-track"><div><i style="width:${m.probability*100}%"></i></div><strong>${pct(m.probability)}</strong></div><div class="projection-footer"><span>Model win probability</span><span>${m.pushProbability>0?`${pct(m.pushProbability)} push`:'No push estimated'}</span></div><div class="projection-sub">Sampling interval: ${pct(m.samplingInterval?.lower)}–${pct(m.samplingInterval?.upper)}. Not model confidence.</div></div>
@@ -343,8 +366,9 @@ function bindEvents() {
   $('#file-format').addEventListener('change',()=>$('#html-fields').classList.toggle('hidden',$('#file-format').value!=='html'));
   $('#import-file').addEventListener('change',async event=>{const file=event.target.files[0];if(!file)return;if(file.size>4*1024*1024){toast('Import files must be under 4 MB.',true);return;}try{$('#import-content').value=await file.text();const ext=file.name.toLowerCase().split('.').pop();$('#file-format').value=ext==='json'?'json':['html','htm'].includes(ext)?'html':'csv';$('#html-fields').classList.toggle('hidden',$('#file-format').value!=='html');}catch{toast('Could not read this file.',true);}});
   $('#file-form').addEventListener('submit',event=>{event.preventDefault();submitImport({format:$('#file-format').value,data:$('#import-content').value,player:$('#html-player').value.trim(),team:$('#html-team').value.trim().toUpperCase(),observedAt:$('#html-observed-at').value.trim()},'file');});
-  $('#settings-button').addEventListener('click',()=>{$('#bankroll-input').value=state.bankroll;$('#sizing-input').checked=state.showSizing;$('#settings-dialog').showModal();});
-  $('#save-settings').addEventListener('click',()=>{const amount=Number($('#bankroll-input').value);if(!Number.isFinite(amount) || amount<1 || amount>1e9){toast('Choose a bankroll between $1 and $1 billion.',true);return;}state.bankroll=amount;state.showSizing=$('#sizing-input').checked;storePreference('bankroll',amount);storePreference('showSizing',state.showSizing);$('#settings-dialog').close();renderPanel();toast('Research preferences saved in this browser.');});
+  $('#theme-toggle').addEventListener('click',()=>setThemePreference(theme==='dark'?'light':'dark'));
+  $('#settings-button').addEventListener('click',()=>{$('#bankroll-input').value=state.bankroll;$('#sizing-input').checked=state.showSizing;$('#theme-input').value=themePreference;$('#settings-dialog').showModal();});
+  $('#save-settings').addEventListener('click',()=>{const amount=Number($('#bankroll-input').value);if(!Number.isFinite(amount) || amount<1 || amount>1e9){toast('Choose a bankroll between $1 and $1 billion.',true);return;}state.bankroll=amount;state.showSizing=$('#sizing-input').checked;storePreference('bankroll',amount);storePreference('showSizing',state.showSizing);setThemePreference($('#theme-input').value);$('#settings-dialog').close();renderPanel();toast('Research preferences saved in this browser.');});
   $('#clear-imports').addEventListener('click',async()=>{if(!window.confirm('Remove all locally saved quote, feature and schedule imports? This cannot be undone.'))return;try{await api('/api/clear-imports',{});$('#settings-dialog').close();await getState();toast('Saved imports cleared. Public caches were not deleted.');}catch(error){toast(error.message,true);}});
   document.addEventListener('keydown',event=>{if(event.key==='/' && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName) && !$$('dialog[open]').length){event.preventDefault();if(state.view==='lab')setView('markets');$('#search-input').focus();}});
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)getState(true);});

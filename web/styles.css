@@ -20,3 +20,178 @@ main{flex:1;min-width:0;padding:20px 30px 0;max-width:1900px;margin:0 auto}.mode
 /* Historical archive coverage stays distinct from synthetic demo/live price feeds. */
 .history-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:20px 0}.history-metrics>div{padding:16px;border:1px solid var(--line);border-radius:10px;background:var(--bg)}.history-metrics strong{display:block;font-size:24px;letter-spacing:-.5px}.history-metrics span{display:block;font-size:12px;color:var(--muted);margin-top:6px}.history-card pre{white-space:pre-wrap;overflow-wrap:anywhere}.history-card>button{margin-top:4px}
 @media(max-width:700px){.history-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.history-metrics strong{font-size:21px}}
+
+/* Appearance settings + partial-feed badge (theme-independent). */
+.settings-field select{border:1px solid #e2e9f3;border-radius:6px;background:#fbfcff;padding:9px 10px;min-width:0;width:100%;font-size:11px;color:#607a9f}
+.source-badge.partial{background:#fff8ec;color:#bf9f60}
+
+/* Dark mode. The effective theme is <html data-theme="dark">, set from the
+   saved preference or the OS setting. Light rules above stay untouched;
+   these overrides recolor every surface that used a literal light color. */
+:root[data-theme="dark"]{--blue:#5b93ff;--blue-light:#1b2c4e;--ink:#e8eef7;--text:#c3cfe0;--muted:#8fa0b8;--line:#24314d;--bg:#0a1120;--green:#3ecf8e;--green-bg:#123527;--red:#ff858d;--red-bg:#3a1f27;--amber:#e5b45a;--amber-bg:#36290f;--white:#111a2c;--shadow:0 6px 24px rgba(0,0,0,.28);color-scheme:dark}
+[data-theme="dark"] body{background:var(--bg);color:var(--ink)}
+[data-theme="dark"] .topbar,[data-theme="dark"] .sidebar{background:#0d1626;border-color:var(--line)}
+[data-theme="dark"] .primary-nav>button{color:#8fa0b8}
+[data-theme="dark"] .primary-nav>button.active{color:var(--blue)}
+[data-theme="dark"] .nav-count,[data-theme="dark"] .side-count{background:#1a2740;color:#93a5c0}
+[data-theme="dark"] .category-link.active .side-count{background:#27436f;color:#b9d2ff}
+[data-theme="dark"] .profile-avatar{background:#1b2c4e;border-color:#0d1626;box-shadow:0 0 0 1px #2a3c5f;color:#9db9e8}
+[data-theme="dark"] .icon-button{color:#93a5c0}
+[data-theme="dark"] .icon-button:hover{background:var(--blue-light)}
+[data-theme="dark"] .league-icon{background:#2d2114;color:#f0a35e}
+[data-theme="dark"] .category-link,[data-theme="dark"] .sidebar-link{color:#a9b8cf}
+[data-theme="dark"] .category-link>span:first-child,[data-theme="dark"] .sidebar-link>span:first-child{color:#7186a3}
+[data-theme="dark"] .category-link:hover,[data-theme="dark"] .sidebar-link:hover{background:#14213a}
+[data-theme="dark"] .category-link.active>span:first-child{color:var(--blue)}
+[data-theme="dark"] .sidebar-divider,[data-theme="dark"] .sidebar-version{border-color:var(--line)}
+[data-theme="dark"] .sidebar-bottom{color:#7186a3}
+[data-theme="dark"] .local-label{color:#9db0ca}
+[data-theme="dark"] .mode-banner{background:#12203c;border-color:#21365e;color:#9db6dd}
+[data-theme="dark"] .mode-banner strong{color:#c7dbff}
+[data-theme="dark"] .mode-banner.live-mode{background:#0f2a20;border-color:#1e4636;color:#9fd3b6}
+[data-theme="dark"] .mode-banner.live-mode strong{color:#b8e6cc}
+[data-theme="dark"] .connection-banner{background:var(--red-bg);border-color:#63303c;color:#ffadb3}
+[data-theme="dark"] .eyebrow{color:#7186a3}
+[data-theme="dark"] .page-heading p{color:#8fa0b8}
+[data-theme="dark"] .mode-switch{background:#16233c}
+[data-theme="dark"] .mode-switch button{color:#8fa0b8}
+[data-theme="dark"] .mode-switch button.active{background:#22345a;color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.4)}
+[data-theme="dark"] .button-outline{background:#111c30;color:#b9c8de;border-color:var(--line)}
+[data-theme="dark"] .button-outline:hover{border-color:#35538a}
+[data-theme="dark"] .button-quiet{color:#8fa0b8}
+[data-theme="dark"] .button-quiet:hover{background:#16233c}
+[data-theme="dark"] .button-danger{background:var(--red-bg);color:#ff9aa1}
+[data-theme="dark"] .stat-tile,[data-theme="dark"] .game-card,[data-theme="dark"] .market-board,[data-theme="dark"] .research-panel,[data-theme="dark"] .lab-card{background:#101a2d;border-color:var(--line)}
+[data-theme="dark"] .stat-icon{background:#1a2742;color:#8fb0e8}
+[data-theme="dark"] .stat-tile:first-child .stat-icon{background:#123527;color:#5fd8a4}
+[data-theme="dark"] .stat-label,[data-theme="dark"] .stat-detail{color:#7186a3}
+[data-theme="dark"] .stat-value small{color:#7186a3}
+[data-theme="dark"] .section-heading h2>span{color:#7186a3}
+[data-theme="dark"] .time-switch button{color:#7186a3}
+[data-theme="dark"] .game-card:hover{border-color:#35538a;box-shadow:0 3px 10px rgba(0,0,0,.35)}
+[data-theme="dark"] .game-card.selected{box-shadow:0 0 0 1px rgba(91,147,255,.35)}
+[data-theme="dark"] .game-meta{color:#7186a3}
+[data-theme="dark"] .status-pill{background:#1a2742;color:#9db6dd}
+[data-theme="dark"] .status-pill.live{background:var(--red-bg);color:#ff9aa1}
+[data-theme="dark"] .team-badge,[data-theme="dark"] .player-avatar{background:color-mix(in srgb,var(--team-color,#637083) 24%,#101a2d);border-color:color-mix(in srgb,var(--team-color,#637083) 45%,transparent);color:color-mix(in srgb,var(--team-color,#637083) 55%,#fff)}
+[data-theme="dark"] .game-team .game-odds{background:var(--blue-light);border-color:#2a4069;color:#a9c6ff}
+[data-theme="dark"] .game-bottom{border-color:#1b2947;color:#7186a3}
+[data-theme="dark"] .game-empty{background:#0e1830;border-color:#2a3c5f;color:#8fa0b8}
+[data-theme="dark"] .game-empty strong{color:#c3d4ee}
+[data-theme="dark"] .search-box{background:#0d1729;border-color:var(--line);color:#7186a3}
+[data-theme="dark"] .search-box input{color:var(--ink)}
+[data-theme="dark"] .search-box input::placeholder{color:#5f748f}
+[data-theme="dark"] .search-box kbd{background:#16233a;border-color:#263656;color:#8fa0b8}
+[data-theme="dark"] .filter-button,[data-theme="dark"] .select-wrap,[data-theme="dark"] .filter-more{background:#101a2d;border-color:var(--line);color:#a9b8cf}
+[data-theme="dark"] .filter-button.active{background:var(--green-bg);border-color:#1e5c40}
+[data-theme="dark"] .select-wrap select{color:#a9b8cf}
+[data-theme="dark"] .extra-filters{background:#0d1729;border-color:#1b2947;color:#8fa0b8}
+[data-theme="dark"] .extra-filters input[type=number],[data-theme="dark"] .extra-filters select{background:#101a2d;border-color:#263656;color:var(--ink)}
+[data-theme="dark"] .active-game-filter{background:#122344;border-color:#21365e;color:#a9c6ff}
+[data-theme="dark"] .markets-table th{background:#0d1729;border-color:#1b2947;color:#7186a3}
+[data-theme="dark"] .markets-table td{border-color:#1c2946}
+[data-theme="dark"] .markets-table tbody tr:hover{background:#13203a}
+[data-theme="dark"] .markets-table tbody tr.selected{background:#16294e}
+[data-theme="dark"] .market-name{color:#dfe8f5}
+[data-theme="dark"] .market-line,[data-theme="dark"] .matchup-label,[data-theme="dark"] .book-label,[data-theme="dark"] .model-sub{color:#7186a3}
+[data-theme="dark"] .market-line .line-value{color:#a9c6ff}
+[data-theme="dark"] .matchup-label small{color:#5f748f}
+[data-theme="dark"] .price-value,[data-theme="dark"] .model-value{color:#c3d4ee}
+[data-theme="dark"] .ev-chip{background:#123527}
+[data-theme="dark"] .ev-chip.negative{background:#2b1c22;color:#c48f96}
+[data-theme="dark"] .ev-chip.neutral{background:#1a2742;color:#8fa0b8}
+[data-theme="dark"] .watch-button{color:#54678a}
+[data-theme="dark"] .watch-button:hover{background:var(--blue-light)}
+[data-theme="dark"] .board-footer{color:#7186a3}
+[data-theme="dark"] .pagination .icon-button{border-color:#263656}
+[data-theme="dark"] .empty-state{color:#8fa0b8}
+[data-theme="dark"] .empty-state h3{color:#c3d4ee}
+[data-theme="dark"] .experimental-pill{background:#16233a;border-color:#263656;color:#93a5c0}
+[data-theme="dark"] .research-identity p,[data-theme="dark"] .research-quote-meta{color:#7186a3}
+[data-theme="dark"] .research-selection{background:#12203c;border-color:#21365e;color:#c3d4ee}
+[data-theme="dark"] .research-selection span:last-child{color:var(--blue)}
+[data-theme="dark"] .research-price-age.stale{color:#e5b45a}
+[data-theme="dark"] .projection-block{border-color:#1b2947}
+[data-theme="dark"] .projection-value{color:#eaf1fb}
+[data-theme="dark"] .projection-value small,[data-theme="dark"] .projection-sub,[data-theme="dark"] .projection-footer,[data-theme="dark"] .projection-caption{color:#7186a3}
+[data-theme="dark"] .probability-track>div{background:#1b2947}
+[data-theme="dark"] .probability-track strong{color:#a9c6ff}
+[data-theme="dark"] .research-stat-grid{background:#0d1729;border-color:#1b2947}
+[data-theme="dark"] .research-stat+div{border-color:#263656}
+[data-theme="dark"] .research-stat span,[data-theme="dark"] .research-stat small{color:#7186a3}
+[data-theme="dark"] .research-stat strong{color:#a9c6ff}
+[data-theme="dark"] .mini-heading{color:#9db0ca}
+[data-theme="dark"] .mini-heading span,[data-theme="dark"] .chart-labels{color:#5f748f}
+[data-theme="dark"] .recent-bar{background:#35538a}
+[data-theme="dark"] .recent-bar.hit{background:#2f7d5c}
+[data-theme="dark"] .feature-row{color:#8fa0b8}
+[data-theme="dark"] .feature-row strong{color:#c3d4ee}
+[data-theme="dark"] .feature-detail{border-color:#1b2947}
+[data-theme="dark"] .feature-detail summary,[data-theme="dark"] .caveats-detail summary{color:#8fb0e8}
+[data-theme="dark"] .research-warning{background:#141f36;border-color:#263656;color:#8fa0b8}
+[data-theme="dark"] .research-unavailable{background:#2e2410;border-color:#57451c;color:#d9bd85}
+[data-theme="dark"] .research-unavailable strong{color:#e8cc8f}
+[data-theme="dark"] .save-selection{border-color:#2a4069;color:#a9c6ff}
+[data-theme="dark"] .save-selection.saved{background:#2e2410;border-color:#57451c;color:#e5b45a}
+[data-theme="dark"] .caveats-detail{color:#7186a3}
+[data-theme="dark"] .sizing-block{background:#211a38;color:#b3a3d9}
+[data-theme="dark"] .sizing-block strong{color:#cbbcf2}
+[data-theme="dark"] .panel-empty{color:#7186a3}
+[data-theme="dark"] .footer-logo{color:#54678a}
+[data-theme="dark"] .main-footer{color:#7186a3}
+[data-theme="dark"] .main-footer button{color:#8fb0e8}
+[data-theme="dark"] .lab-heading p{color:#8fa0b8}
+[data-theme="dark"] .lab-warning{background:#2e2410;border-color:#57451c;color:#d9bd85}
+[data-theme="dark"] .lab-warning strong{color:#e8cc8f}
+[data-theme="dark"] .lab-card h2 span{color:#7186a3}
+[data-theme="dark"] .lab-card p,[data-theme="dark"] .lab-card ol{color:#93a5c0}
+[data-theme="dark"] .lab-card li strong{color:#c3d4ee}
+[data-theme="dark"] .lab-card pre{background:#0d1729;color:#9db6dd}
+[data-theme="dark"] .source-card{border-color:#1b2947}
+[data-theme="dark"] .source-icon{background:#1a2742;color:#8fb0e8}
+[data-theme="dark"] .source-title{color:#c3d4ee}
+[data-theme="dark"] .source-badge{background:#1a2742;color:#8fa0b8}
+[data-theme="dark"] .source-badge.ok,[data-theme="dark"] .source-badge.cached,[data-theme="dark"] .source-badge.user_import{background:#123527;color:#5fd8a4}
+[data-theme="dark"] .source-badge.unavailable,[data-theme="dark"] .source-badge.stale{background:var(--red-bg);color:#ff9aa1}
+[data-theme="dark"] .source-badge.demo,[data-theme="dark"] .source-badge.import_required,[data-theme="dark"] .source-badge.partial{background:#36290f;color:#e5b45a}
+[data-theme="dark"] .source-body small{color:#5f748f}
+[data-theme="dark"] .catalog-item{background:#0e1830;border-color:#1b2947}
+[data-theme="dark"] .catalog-item>strong{color:#c3d4ee}
+[data-theme="dark"] .catalog-item>div{color:#5f748f}
+[data-theme="dark"] .role-tag{background:#123527;color:#5fd8a4}
+[data-theme="dark"] .role-tag.context{background:#16294e;color:#8fb0e8}
+[data-theme="dark"] .role-tag.guard{background:#36290f;color:#e5b45a}
+[data-theme="dark"] .role-tag.not-implemented{background:#211a38;color:#b3a3d9}
+[data-theme="dark"] .lab-ref,[data-theme="dark"] .lab-ref a{color:#8fb0e8}
+[data-theme="dark"] .coverage-note{background:#10203c;border-color:#21365e;color:#9db6dd}
+[data-theme="dark"] .history-metrics>div{background:#0d1729;border-color:var(--line)}
+[data-theme="dark"] .modal{background:#101a2d;border-color:#2a3c5f;color:var(--ink)}
+[data-theme="dark"] .modal::backdrop{background:rgba(2,6,16,.7)}
+[data-theme="dark"] .modal-intro{color:#8fa0b8}
+[data-theme="dark"] .modal-tabs button{color:#7186a3}
+[data-theme="dark"] .form-grid label,[data-theme="dark"] .import-file-toolbar label{color:#93a5c0}
+[data-theme="dark"] .form-grid input,[data-theme="dark"] .form-grid select,[data-theme="dark"] .import-file-toolbar select,[data-theme="dark"] .settings-field input,[data-theme="dark"] .settings-field select{background:#0d1729;border-color:#263656;color:var(--ink)}
+[data-theme="dark"] .form-grid input::placeholder{color:#5f748f}
+[data-theme="dark"] .form-note{color:#7186a3}
+[data-theme="dark"] .form-note code{color:#8fb0e8}
+[data-theme="dark"] .form-error{background:var(--red-bg);border-color:#63303c;color:#ffadb3}
+[data-theme="dark"] .import-mode-note{background:#111f38;color:#8fa0b8}
+[data-theme="dark"] .dropzone{background:#0e1a30;border-color:#35538a;color:#8fb0e8}
+[data-theme="dark"] .dropzone strong{color:#c3d4ee}
+[data-theme="dark"] .dropzone small,[data-theme="dark"] .dropzone input{color:#7186a3}
+[data-theme="dark"] .dropzone input::file-selector-button{background:#1b2c4e;color:#a9c6ff}
+[data-theme="dark"] #import-content{background:#0d1729;border-color:#263656;color:#c3d4ee}
+[data-theme="dark"] .settings-field{color:#93a5c0}
+[data-theme="dark"] .settings-field small,[data-theme="dark"] .sizing-opt{color:#7186a3}
+[data-theme="dark"] .settings-info{border-color:#1b2947;color:#8fa0b8}
+[data-theme="dark"] .settings-info strong{color:#c3d4ee}
+[data-theme="dark"] .settings-info code{background:#1a2742;color:#a9c6ff}
+[data-theme="dark"] .toast{background:#22345a;color:#eef4fd}
+[data-theme="dark"] .toast.error{background:#7c3542}
+[data-theme="dark"] .loading-overlay{background:#0a1120;color:#c3d4ee}
+[data-theme="dark"] .loading-overlay small{color:#7186a3}
+[data-theme="dark"] *{scrollbar-color:#2c4066 transparent}
+
+/* The header now carries theme + settings icon buttons; keep the 390px
+   header inside the viewport. */
+@media(max-width:650px){.topbar{gap:6px}.primary-nav{gap:9px}.header-actions .icon-button{width:19px}}

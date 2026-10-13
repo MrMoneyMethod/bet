@@ -25,6 +25,15 @@ const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors
 const waitToast=async()=>page.locator('#toast').waitFor({state:'visible'});
 try{
   await page.goto(base,{waitUntil:'networkidle'});await page.locator('#loading-overlay').waitFor({state:'hidden'});
+  const initialTheme=await page.evaluate(()=>document.documentElement.dataset.theme);
+  const initialBg=await page.evaluate(()=>getComputedStyle(document.body).backgroundColor);
+  await page.locator('#theme-toggle').click();
+  const toggledTheme=await page.evaluate(()=>document.documentElement.dataset.theme);
+  assert.notEqual(toggledTheme,initialTheme);assert.equal(await page.locator('#theme-toggle').getAttribute('aria-pressed'),String(toggledTheme==='dark'));
+  assert.notEqual(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor),initialBg);
+  await page.reload({waitUntil:'networkidle'});await page.locator('#loading-overlay').waitFor({state:'hidden'});
+  assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),toggledTheme,'Theme preference must persist across reload');
+  await page.locator('#theme-toggle').click();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),initialTheme);
   await page.locator('#refresh-button').click();await waitToast();
   assert.equal(await page.locator('#market-rows tr').count(),8);
   assert.match(await page.locator('.markets-table thead').innerText(),/Odds %/i);
@@ -67,5 +76,5 @@ try{
   await page.setViewportSize({width:1440,height:1000});await page.locator('#settings-button').click();await page.locator('#sizing-input').uncheck();await page.locator('#save-settings').click();await page.locator('#more-filters').click();
   await page.screenshot({path:'.cache/browser-results/desktop.png',fullPage:true});
   assert.deepEqual(errors,[]);
-  console.log('PASS browser: percentage-only prices/input/CSV export, historical coverage/reload, category/search/EV filters, watchlist, game/status filters, model lab, manual/file import, validation errors, safe HTML escaping, CSV export, pagination, settings, mobile category access and responsive layout.');
+  console.log('PASS browser: dark-mode toggle + persistence, percentage-only prices/input/CSV export, historical coverage/reload, category/search/EV filters, watchlist, game/status filters, model lab, manual/file import, validation errors, safe HTML escaping, CSV export, pagination, settings, mobile category access and responsive layout.');
 }finally{await browser.close();}
