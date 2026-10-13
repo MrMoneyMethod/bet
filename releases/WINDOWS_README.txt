@@ -6,10 +6,44 @@ EDGECOURT 0.3.0 - WINDOWS 10/11 x64
 3. Your default browser opens the local dashboard.
 4. Keep the executable's console window open; Ctrl+C/closing it stops the app.
 
-No API keys, Python, Node, OpenSSL install, account, or external web server
-is required to run it. HTML/CSS/JS are embedded in the executable.
+No API key, Python, Node, OpenSSL install, account, or external web server
+is required to run it. HTML/CSS/JS are embedded in the executable. Optional
+provider credentials are read only from process environment variables; none
+are compiled into the EXE or sent to the browser.
 The default server listens only on 127.0.0.1, preferably port 8741.
 If automatic browser launch fails, copy the printed local URL into a browser.
+
+OPTIONAL PROVIDER CREDENTIALS
+-----------------------------
+Set variables in a PowerShell window before launching Edgecourt. These values
+are placeholders; replace them privately on your own machine and do not save
+real credentials in a script, project file, issue or chat:
+
+  $env:API_BASKETBALL_KEY = "YOUR_API_SPORTS_KEY"
+  $env:SHARPAPI_KEY = "YOUR_SHARPAPI_KEY"
+  $env:RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY"
+  # Only if this exactly matches your generated RapidAPI code snippet:
+  $env:RAPIDAPI_HOST = "sportsbook-api2.p.rapidapi.com"
+  $env:THESPORTSDB_KEY = "YOUR_PREMIUM_THESPORTSDB_KEY"
+  $env:SPORTSCORE_KEY = "OPTIONAL_SPORTSCORE_KEY"
+  .\Edgecourt.exe
+
+API-Basketball and SharpAPI enable named-book pregame NBA moneylines when
+configured. Sportsbook API2 uses RAPIDAPI_KEY and conservatively honors the
+lower published limit of 50 requests/day: Edgecourt stops at 40/day and keeps
+ten requests in reserve; its normal odds cache is two hours. The configured
+RapidAPI host is inferred from the product slug, not live-confirmed; compare
+it with the host in your generated RapidAPI code snippet before first use. The
+app sends no request or key until RAPIDAPI_HOST is set to that exact host. Numeric API2
+payout units are undocumented, so the odds conversion is heuristic until
+verified against a sanitized provider response. TheSportsDB V2 is premium
+and uses THESPORTSDB_KEY in the X-API-KEY header. SportScore works without a
+key; SPORTSCORE_KEY is optional. SportScore context is linked with the required
+visible dofollow attribution. NBA_Go is keyless according to the inspected
+Swagger. NBA_Go, TheSportsDB and SportScore supply context only and do not
+change a probability. Requests may count against provider plan quotas/billing.
+If you shared a real key outside the provider's secret manager, rotate it.
+Unset optional variables after use if you share the PowerShell session.
 
 DEMO VS PUBLIC DATA
 -------------------

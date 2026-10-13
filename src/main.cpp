@@ -37,7 +37,7 @@ void open_browser(const std::string &url) {
 void help() {
     std::cout << "Edgecourt " << edgecourt::VERSION << " - local NBA market research\n\n"
               << "  Edgecourt.exe                        Start and open your browser\n"
-              << "  Edgecourt.exe --live                 Request keyless public feeds\n"
+              << "  Edgecourt.exe --live                 Request public feeds (+ optional API-Sports/SharpAPI keys)\n"
               << "  Edgecourt.exe --demo                 Synthetic demonstration\n"
               << "  --port 8741                          Preferred HTTP port\n"
               << "  --host 127.0.0.1                     Loopback only (default)\n"

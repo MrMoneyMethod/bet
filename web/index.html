@@ -27,7 +27,7 @@
       <button class="sidebar-link" data-view="watchlist"><span data-icon="bookmark"></span>Saved markets<span id="side-watch-count" class="side-count">0</span></button>
       <button class="sidebar-link" data-view="lab"><span data-icon="layers"></span>Data & features<span class="side-count">53</span></button>
       <button class="sidebar-link" data-view="debug"><span data-icon="warning"></span>Debug log<span id="side-debug-count" class="side-count">0</span></button>
-      <div class="sidebar-bottom"><div class="local-label"><span data-icon="shield"></span>Runs on your computer</div><p>No keys. No account.<br>No automatic betting.</p><div class="sidebar-version">v0.3.0 <span>Experimental model</span></div></div>
+      <div class="sidebar-bottom"><div class="local-label"><span data-icon="shield"></span>Runs on your computer</div><p>Optional odds keys.<br>No account or auto-betting.</p><div class="sidebar-version">v0.3.0 <span>Experimental model</span></div></div>
     </aside>
     <main id="main-content">
       <div id="connection-banner" class="connection-banner hidden" role="alert"></div>
@@ -81,7 +81,7 @@
     <label class="settings-field">Illustrative bankroll ($)<input id="bankroll-input" type="number" min="1" max="1000000000" step="1" value="1000"><small>Used only for the optional fractional-Kelly illustration. No bets are placed.</small></label>
     <label class="checkbox-label sizing-opt"><input id="sizing-input" type="checkbox">Show experimental stake-sizing illustration</label>
     <div class="settings-info"><span data-icon="shield"></span><div><strong>Private by default</strong><p>Your Windows executable listens on 127.0.0.1. Saved imports live in <code>%LOCALAPPDATA%\Edgecourt</code>. Browser preferences stay in this browser.</p></div></div>
-    <div class="settings-info"><span data-icon="clock"></span><div><strong>Freshness before an edge</strong><p>EV is disabled after 15 minutes for pregame prices and 90 seconds for live prices. Fresh live box scores are required. Public feeds refresh every 60 seconds; stats are cached for 6 hours.</p></div></div>
+    <div class="settings-info"><span data-icon="clock"></span><div><strong>Freshness before an edge</strong><p>EV is disabled after 15 minutes for ordinary pregame prices and 90 seconds for live prices; API-Basketball pregame odds use a 24-hour window because the provider updates them daily. SharpAPI pregame odds are polled at most every 5 minutes (Free tier data is delayed 60 seconds). Fresh live box scores are required. Public feeds check every 60 seconds, while source caches space actual requests; stats are cached for 6 hours.</p></div></div>
     <button id="save-settings" class="button button-primary full-button">Save settings</button><button id="clear-imports" class="button button-danger full-button">Clear saved imports</button>
   </dialog>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>

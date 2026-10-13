@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 if [[ -z "${ZIG:-}" ]]; then
   if command -v zig >/dev/null 2>&1; then ZIG="$(command -v zig)";
+  elif [[ -x .cache/python-tools/ziglang/zig ]]; then ZIG="$PWD/.cache/python-tools/ziglang/zig";
   elif [[ -x .cache/ziglang/ziglang/zig ]]; then ZIG="$PWD/.cache/ziglang/ziglang/zig";
   else echo 'Install Zig 0.13.0 or set ZIG to its executable.' >&2; exit 1; fi
 fi
