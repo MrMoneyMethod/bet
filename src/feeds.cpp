@@ -1070,6 +1070,83 @@ void parse_pinnacle_markets(const json &matchups, const json &markets, json &s, 
         }
     }
 }
+void parse_standings(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueStandingsV3: one row per team, no abbreviation column, so
+    // TeamCity + TeamName are mapped through the full-name table.
+    for (const auto &row : nba_rows(doc)) {
+        if (!row.contains("TeamName") || !row.contains("WINS"))
+            continue;
+        auto abbr = abbr_from_name(text(row.value("TeamCity", json(""))) + " " + text(row["TeamName"]));
+        if (abbr.empty() || abbr.size() > 3)
+            continue;
+        auto &t = ensure_team(s, abbr);
+        t["standings"] = {{"wins", number(row.value("WINS", json(0)))},
+                          {"losses", number(row.value("LOSSES", json(0)))},
+                          {"winPct", number(row.value("WinPCT", json(0)))},
+                          {"record", text(row.value("Record", json("")))},
+                          {"home", text(row.value("HOME", json("")))},
+                          {"road", text(row.value("ROAD", json("")))},
+                          {"last10", text(row.value("L10", json("")))},
+                          {"streak", text(row.value("strCurrentStreak", json("")))},
+                          {"conference", text(row.value("Conference", json("")))},
+                          {"conferenceRank", number(row.value("PlayoffRank", json(0)))},
+                          {"gamesBack", number(row.value("ConferenceGamesBack", json(0)))},
+                          {"pointsPg", number(row.value("PointsPG", json(0)))},
+                          {"oppPointsPg", number(row.value("OppPointsPG", json(0)))},
+                          {"diffPointsPg", number(row.value("DiffPointsPG", json(0)))},
+                          {"asOf", fetched}};
+    }
+}
+void parse_player_season_stats(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueDashPlayerStats (Base, PerGame). Enriches players already in
+    // the snapshot from game logs; a season line alone never creates a player,
+    // because it carries no dated game-by-game history for the model.
+    for (const auto &row : nba_rows(doc)) {
+        if (!row.contains("PLAYER_NAME") || !row.contains("PTS"))
+            continue;
+        const auto key = normalize_name(text(row["PLAYER_NAME"]));
+        if (!s["players"].contains(key))
+            continue;
+        auto &p = s["players"][key];
+        p["seasonStats"] = {{"gp", number(row.value("GP", json(0)))},
+                            {"min", number(row.value("MIN", json(0)))},
+                            {"pts", number(row.value("PTS", json(0)))},
+                            {"reb", number(row.value("REB", json(0)))},
+                            {"ast", number(row.value("AST", json(0)))},
+                            {"fg3m", number(row.value("FG3M", json(0)))},
+                            {"stl", number(row.value("STL", json(0)))},
+                            {"blk", number(row.value("BLK", json(0)))},
+                            {"fgPct", number(row.value("FG_PCT", json(0)))},
+                            {"fg3Pct", number(row.value("FG3_PCT", json(0)))},
+                            {"ftPct", number(row.value("FT_PCT", json(0)))},
+                            {"plusMinus", number(row.value("PLUS_MINUS", json(0)))},
+                            {"dd2", number(row.value("DD2", json(0)))},
+                            {"td3", number(row.value("TD3", json(0)))},
+                            {"asOf", fetched}};
+    }
+}
+void parse_team_four_factors(const json &doc, json &s, const std::string &fetched) {
+    // nba_api LeagueDashTeamStats with MeasureType=Four Factors.
+    for (const auto &row : nba_rows(doc)) {
+        if (!row.contains("EFG_PCT"))
+            continue;
+        auto abbr = canonical_team(text(row.value("TEAM_ABBREVIATION", json(""))));
+        if (abbr.size() > 3 || abbr.empty())
+            abbr = abbr_from_name(text(row.value("TEAM_NAME", json(""))));
+        if (abbr.empty() || abbr.size() > 3)
+            continue;
+        auto &t = ensure_team(s, abbr);
+        t["fourFactors"] = {{"efgPct", number(row.value("EFG_PCT", json(0)))},
+                            {"ftaRate", number(row.value("FTA_RATE", json(0)))},
+                            {"tovPct", number(row.value("TM_TOV_PCT", json(0)))},
+                            {"orebPct", number(row.value("OREB_PCT", json(0)))},
+                            {"oppEfgPct", number(row.value("OPP_EFG_PCT", json(0)))},
+                            {"oppFtaRate", number(row.value("OPP_FTA_RATE", json(0)))},
+                            {"oppTovPct", number(row.value("OPP_TOV_PCT", json(0)))},
+                            {"oppOrebPct", number(row.value("OPP_OREB_PCT", json(0)))},
+                            {"asOf", fetched}};
+    }
+}
 json scrape_saved_html(const std::string &html, const std::string &player, const std::string &team,
                        const std::string &observed_at) {
     if (html.size() > 4 * 1024 * 1024)
@@ -1487,6 +1564,59 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
          {"count", 0},
          {"message", "There is no bundled reliable free/keyless all-books prop feed. Import current CSV/JSON "
                      "quotes. First basket also requires explicit history and confirmed starters."}});
+    // More keyless context from swar/nba_api endpoint definitions (standings,
+    // player season lines, team Four Factors). Cached for 6 hours like the other
+    // stats feeds and fetched last: they enrich research panels and schedule
+    // cards as context, and never gate or alter a probability.
+    auto standings = get("https://stats.nba.com/stats/leaguestandingsv3?LeagueID=00&Season=" + season +
+                             "&SeasonType=Regular%20Season&SeasonYear=",
+                         21600, 172800);
+    if (!standings.data.is_null())
+        parse_standings(standings.data, s, standings.fetched_at);
+    int standings_count = 0;
+    for (const auto &item : s["teams"].items())
+        if (item.value().contains("standings"))
+            ++standings_count;
+    s["sources"].push_back(source("nba-standings", "NBA standings (nba_api LeagueStandingsV3)", standings,
+                                  standings_count,
+                                  "Wins/losses, win %, home/road and last-10 splits, streak, conference "
+                                  "rank and games back. Context for moneyline research; not a model input."));
+    auto season_stats =
+        get("https://stats.nba.com/stats/leaguedashplayerstats?LastNGames=0&LeagueID=00&MeasureType=Base&"
+            "Month=0&OpponentTeamID=0&PORound=&PaceAdjust=N&PerMode=PerGame&Period=0&PlusMinus=N&Rank=N&"
+            "Season=" +
+                season + "&SeasonType=Regular%20Season",
+            21600, 172800);
+    if (!season_stats.data.is_null())
+        parse_player_season_stats(season_stats.data, s, season_stats.fetched_at);
+    int season_stats_count = 0;
+    for (const auto &item : s["players"].items())
+        if (item.value().contains("seasonStats"))
+            ++season_stats_count;
+    s["sources"].push_back(source("nba-season-stats", "NBA player season stats (nba_api LeagueDashPlayerStats)",
+                                  season_stats, season_stats_count,
+                                  "Season per-game points/rebounds/assists/3PM, shooting percentages, "
+                                  "plus-minus and double-/triple-double counts. Context beside the "
+                                  "game-log model inputs; a season line never replaces dated logs."));
+    const auto four_factors_url =
+        "https://stats.nba.com/stats/"
+        "leaguedashteamstats?Conference=&DateFrom=&DateTo=&Division=&GameScope=&GameSegment=&LastNGames=0&"
+        "LeagueID=00&Location=&MeasureType=Four%20Factors&Month=0&OpponentTeamID=0&Outcome=&PORound=0&"
+        "PaceAdjust=N&PerMode=PerGame&Period=0&PlayerExperience=&PlayerPosition=&PlusMinus=N&Rank=N&Season=" +
+        season +
+        "&SeasonSegment=&SeasonType=Regular%20Season&ShotClockRange=&StarterBench=&TeamID=0&TwoWay=0&"
+        "VsConference=&VsDivision=";
+    auto four_factors = get(four_factors_url, 21600, 172800);
+    if (!four_factors.data.is_null())
+        parse_team_four_factors(four_factors.data, s, four_factors.fetched_at);
+    int four_factors_count = 0;
+    for (const auto &item : s["teams"].items())
+        if (item.value().contains("fourFactors"))
+            ++four_factors_count;
+    s["sources"].push_back(source("nba-four-factors", "NBA team Four Factors (nba_api LeagueDashTeamStats)",
+                                  four_factors, four_factors_count,
+                                  "Effective FG%, free-throw rate, turnover and offensive-rebound rates "
+                                  "(plus opponent values). Context for moneyline/team-total research."));
     // Keep only players on active teams in the browser workspace. Cache retains full historical responses.
     for (auto it = s["players"].begin(); it != s["players"].end();) {
         auto team = it.value().value("team", "");

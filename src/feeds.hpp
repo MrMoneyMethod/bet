@@ -31,6 +31,12 @@ void parse_espn_roster(const json &document, json &snapshot, const std::string &
 void parse_player_logs(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_team_logs(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_team_ratings(const json &document, json &snapshot, const std::string &fetched_at);
+// More data derived from swar/nba_api (MIT) endpoint definitions, re-implemented
+// in C++ against stats.nba.com. All three are context data: they are displayed
+// and catalogued as context, never silently fed into a probability.
+void parse_standings(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_player_season_stats(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_team_four_factors(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_polymarket_events(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_kalshi_markets(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_pinnacle_markets(const json &matchups, const json &markets, json &snapshot,
