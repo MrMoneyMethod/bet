@@ -16,6 +16,12 @@ struct FeedResponse {
     int status = 0;
 };
 bool allowed_data_url(const std::string &url);
+// Per-host request headers for public_get. Pinnacle's anonymous guest API
+// rejects requests without its published public-site guest key (401/404), so
+// that host also gets the key and a pinnacle.com referer; every other host
+// gets the generic JSON headers. The key is Pinnacle's own public website
+// key, not a user credential or login.
+std::vector<std::pair<std::string, std::string>> public_request_headers(const std::string &url);
 HttpResponse public_get(const std::string &url);
 // One scoreboard URL per UTC day. ESPN's site API now rejects hyphenated
 // `dates=YYYYMMDD-YYYYMMDD` ranges with HTTP 400, so a window is fetched as

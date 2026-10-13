@@ -46,7 +46,7 @@ This is a **working experimental baseline**, not a proven profitable or calibrat
 
 ### Freshness
 
-EV is disabled for pregame quotes older than **15 minutes** and live quotes older than **90 seconds**. Live scoreboard/player data must also be at most 90 seconds old. Eligibility is rechecked at API-read time, even when model calculations are cached. Imported quote timestamps are never made fresh by refresh/restart.
+In Live mode the server **auto-refreshes public sources every 60 seconds** (measured from the start of the previous refresh; the Refresh button still forces an immediate cycle). EV is disabled for pregame quotes older than **15 minutes** and live quotes older than **90 seconds**. Live scoreboard/player data must also be at most 90 seconds old. Eligibility is rechecked at API-read time, even when model calculations are cached. Imported quote timestamps are never made fresh by refresh/restart.
 
 Public sources refresh every 60 seconds; NBA statistics cache for 6 hours, rosters for 1 hour. Limited historical-cache fallback is explicit. Synthetic demo timestamps refresh separately; imported demo quotes still age normally. Demo imports are temporary and reset on a manual demo refresh.
 

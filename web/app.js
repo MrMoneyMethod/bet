@@ -137,7 +137,10 @@ function syncServerDiagnostics(data) {
   for(const s of data.sources || []) {
     const label=s.label || s.id || 'Data source';
     if(s.state==='unavailable')note('error',label,s.message || 'Source unavailable.');
-    else if(['partial','stale','import_required'].includes(s.state))note('warning',label,s.message || `Source state: ${s.state.replace(/_/g,' ')}.`);
+    else if(['partial','stale'].includes(s.state))note('warning',label,s.message || `Source state: ${s.state.replace(/_/g,' ')}.`);
+    // Standing "bring your own data" states are product design, not faults:
+    // log them once at info level so the Debug badge counts real problems.
+    else if(s.state==='import_required')note('info',label,s.message || 'Import required.');
   }
   const history=data.historicalData;
   if(history && history.state==='unavailable')note('error','Historical play-by-play',history.message || 'Historical archive unavailable.');

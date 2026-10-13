@@ -4,6 +4,7 @@
 #include "history.hpp"
 #include "httplib/httplib.h"
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <mutex>
@@ -40,6 +41,9 @@ class App {
     json snapshot_, base_snapshot_, dashboard_, imports_;
     std::string token_;
     bool feeds_enabled_ = true, stopping_ = false, requested_ = false;
+    // Start time of the most recent live refresh; the worker auto-refreshes
+    // every 60 seconds measured from refresh start (see worker_loop).
+    std::chrono::steady_clock::time_point last_refresh_start_{};
     unsigned long generation_ = 0;
     int revision_ = 0;
     std::atomic<bool> cancel_refresh_{false};
