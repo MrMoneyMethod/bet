@@ -14,7 +14,7 @@
 <body>
   <header class="topbar">
     <a class="brand" href="/" aria-label="Edgecourt home"><span class="brand-mark"><i></i><i></i><i></i></span><span>edgecourt<span class="brand-period">.</span></span></a>
-    <nav class="primary-nav" aria-label="Workspace"><button class="active" data-view="markets">Markets</button><button data-view="watchlist">Watchlist <span id="watch-count" class="nav-count">0</span></button><button data-view="lab">Model lab <span class="beta-label">BETA</span></button></nav>
+    <nav class="primary-nav" aria-label="Workspace"><button class="active" data-view="markets">Markets</button><button data-view="watchlist">Watchlist <span id="watch-count" class="nav-count">0</span></button><button data-view="lab">Model lab <span class="beta-label">BETA</span></button><button data-view="debug">Debug <span id="debug-count" class="nav-count">0</span></button></nav>
     <div class="header-actions"><button id="health-button" class="health-button" title="View data sources"><span class="health-dot"></span><span id="health-label">Demo workspace</span></button><button id="theme-toggle" class="icon-button" title="Switch to dark mode" aria-label="Switch to dark mode" aria-pressed="false" data-icon="moon"></button><button id="settings-button" class="icon-button" title="Settings" aria-label="Open settings" data-icon="settings"></button><span class="profile-avatar" title="Local workspace">EC</span></div>
   </header>
   <div class="app-layout">
@@ -26,6 +26,7 @@
       <div class="sidebar-label">YOUR WORKSPACE</div>
       <button class="sidebar-link" data-view="watchlist"><span data-icon="bookmark"></span>Saved markets<span id="side-watch-count" class="side-count">0</span></button>
       <button class="sidebar-link" data-view="lab"><span data-icon="layers"></span>Data & features<span class="side-count">38</span></button>
+      <button class="sidebar-link" data-view="debug"><span data-icon="warning"></span>Debug log<span id="side-debug-count" class="side-count">0</span></button>
       <div class="sidebar-bottom"><div class="local-label"><span data-icon="shield"></span>Runs on your computer</div><p>No keys. No account.<br>No automatic betting.</p><div class="sidebar-version">v0.3.0 <span>Experimental model</span></div></div>
     </aside>
     <main id="main-content">
@@ -50,6 +51,7 @@
         </div>
       </section>
       <section id="lab-view" class="hidden"></section>
+      <section id="debug-view" class="hidden"></section>
       <footer class="main-footer"><span class="footer-logo">edgecourt.</span><span>Research, not a promise. Model estimates are uncalibrated. Verify prices & settlement rules.</span><button data-view="lab">How the model works <span data-icon="arrowUpRight"></span></button></footer>
     </main>
   </div>
