@@ -68,6 +68,9 @@ with tempfile.TemporaryDirectory(prefix='edgecourt-api-') as directory:
         assert all(m.get('oddsPercent') is not None for m in state['markets'] if m.get('americanOdds') is not None)
         assert request('/api/history/reload', {})[0] == 403
         assert request('/api/history/reload', {}, token)[0] == 200
+        assert request('/api/history/download', {})[0] == 403
+        status, result, _ = request('/api/history/download', {}, token)
+        assert status == 200 and json.loads(result)['started'] is False, 'Demo mode must not auto-download history'
         assert state['summary']['quotes'] > 100
         assert all(m.get('demo', False) for m in state['markets'] if m.get('americanOdds') is not None)
         assert request('/api/refresh', {})[0] == 403

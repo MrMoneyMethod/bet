@@ -994,9 +994,9 @@ json evaluate_quote(const json &q, const json &s) {
         if (pl.contains("historySource")) {
             r["historySource"] = pl["historySource"];
             r["caveats"].push_back(
-                "Local Basketball Reference history supplies game logs and/or dated "
-                "first-FG opportunities. Coverage can be partial; data is not independently "
-                "verified. Historical lineups never confirm current starters.");
+                "Local historical archive (Basketball Reference / SportsDataverse) supplies "
+                "game logs and/or dated first-FG opportunities. Coverage can be partial; data "
+                "is not independently verified. Historical lineups never confirm current starters.");
         }
         if (pl.value("team", "") != team)
             return blocked(r, "Player team does not match the quoted selection.");

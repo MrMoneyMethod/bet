@@ -44,6 +44,8 @@ All provider parsers tolerate absent supported fields; missing data remains miss
 
 ## Odds coverage
 
+The NBA's own odds file (`cdn.nba.com/static/json/liveData/odds/odds_todaysGames.json`) contributes per-sportsbook moneyline quotes (its `2way` market), matched to games through official NBA game/team ids; the source grid shows an `nba-odds` card for this feed. Only the moneyline market is imported — spread and total prices in that file are intentionally ignored.
+
 ESPN public moneyline prices are **indicative**, not independently verified executable prices. Many responses do not include moneylines at all. Retrieval time is not necessarily the book's last-move timestamp.
 
 No all-books prop prices are manufactured from implied model probabilities, game totals, spreads, league averages or demo rows. Team-total odds are not inferred from the game total. A scheduled game without public prices produces explicit unpriced placeholders and zero +EV claims.

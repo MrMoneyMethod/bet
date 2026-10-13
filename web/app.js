@@ -201,10 +201,14 @@ function filteredMarkets() {
     return true;
   });
   return filtered.sort((a,b)=>{
-    if(state.sort==='probability')return (b.probability??-1)-(a.probability??-1);
-    if(state.sort==='start')return new Date(a.game?.startsAt||0)-new Date(b.game?.startsAt||0);
-    if(state.sort==='player')return (a.player||a.team).localeCompare(b.player||b.team);
-    return (b.ev??-1e6)-(a.ev??-1e6) || (a.player||a.team).localeCompare(b.player||b.team);
+    const byName=(a.player||a.team).localeCompare(b.player||b.team);
+    if(state.sort==='probability')return (b.probability??-1)-(a.probability??-1) || byName;
+    if(state.sort==='edge')return (b.edge??-1e6)-(a.edge??-1e6) || byName;
+    if(state.sort==='odds')return (b.oddsPercent??-1)-(a.oddsPercent??-1) || byName;
+    if(state.sort==='start')return new Date(a.game?.startsAt||0)-new Date(b.game?.startsAt||0) || byName;
+    if(state.sort==='startDesc')return new Date(b.game?.startsAt||0)-new Date(a.game?.startsAt||0) || byName;
+    if(state.sort==='player')return byName;
+    return (b.ev??-1e6)-(a.ev??-1e6) || byName;
   });
 }
 function render() {
@@ -323,16 +327,25 @@ function renderPanel() {
 async function reloadHistory() {
   try{const result=await api('/api/history/reload',{});await getState();toast(result.message);}catch(error){toast(error.message,true);}
 }
+async function downloadHistory() {
+  try{const result=await api('/api/history/download',{});await getState();toast(result.message || (result.started?'History download started.':'History download not started.'));}catch(error){toast(error.message,true);}
+}
 function renderHistory() {
   const h=state.data.historicalData || {state:'not_installed',message:'No historical archive installed.'};
   const count=n=>new Intl.NumberFormat().format(n || 0);
-  return `<section class="lab-card full history-card"><h2>Historical play-by-play <span>Basketball Reference · local archive</span></h2>
+  const dl=h.download || null;
+  const dlActive=dl && (dl.state==='downloading' || dl.state==='building');
+  const dlPct=dlActive && dl.bytesTotal>0?Math.min(100,Math.round(dl.bytesDownloaded/dl.bytesTotal*100)):null;
+  const dlLine=dl?`<p class="history-download ${dl.state==='failed'?'failed':''}"><strong>${dl.state==='ready'?'Auto-download: ready':dl.state==='failed'?'Auto-download failed':dl.state==='building'?'Building history bundle':'Downloading history'}.</strong> ${esc(dl.message || '')}${dl.file?` <span class="muted">${esc(dl.file)}${dlPct!=null?` · ${dlPct}%`:dl.bytesDownloaded?` · ${(dl.bytesDownloaded/1048576).toFixed(1)} MB`:''}</span>`:''}${dl.season?` <span class="muted">Season ${esc(dl.season)} · ${esc(dl.seasonsDone ?? 0)}/${esc(dl.seasonsTotal ?? 5)} seasons</span>`:''}</p>`:'';
+  return `<section class="lab-card full history-card"><h2>Historical play-by-play <span>SportsDataverse auto-download · Basketball Reference · local archive</span></h2>
     <div class="history-metrics"><div><strong>${count(h.games)}</strong><span>archived games</span></div><div><strong>${count(h.events)}</strong><span>play-by-play events</span></div><div><strong>${count(h.players)}</strong><span>recent player histories</span></div><div><strong>${count(h.missingGames)}</strong><span>missing / rejected games</span></div></div>
     <p><strong>${esc(h.state.replace(/_/g,' '))}</strong> · ${esc(h.message)}</p>
     ${h.firstDate?`<p class="muted">${esc(h.firstDate)}–${esc(h.lastDate)} · ${esc(h.coverage || 'Partial coverage')} · ${state.data.mode==='demo'?'Not applied to synthetic Demo':'Applied to Live-data estimates when eligibility guards pass'}</p>`:''}
     <p>All collected events stay in a resumable SQLite archive. The model uses recent complete game vectors and dated first-made-field-goal opportunities for historical starters. It still needs a current schedule, prices and confirmed starters; it does not train itself or invent missing history.</p>
     <pre>python scripts/basketball_reference_history.py status --output edgecourt-data/history
 Edgecourt --live --data-dir edgecourt-data</pre>
+    ${dlLine}
+    <button class="button button-outline" id="history-download" ${dlActive?'disabled':''}>${icon('download')}${dlActive?'Downloading…':'Download / update history'}</button>
     <button class="button button-outline" id="history-reload">${icon('refresh')}Reload local history</button>
     <div class="coverage-note">The full crawl has not been run in this sandbox. Basketball Reference access is restricted here. Only run the optional collector if you have permission for your use under Sports Reference's data-use terms. It respects robots rules, waits at least 3.1 seconds between requests, and stops on access or rate-limit denials. See docs/HISTORICAL_DATA.md for collection, saved-page ingestion and coverage details.</div></section>`;
 }
@@ -473,6 +486,7 @@ function bindEvents() {
     if(event.target.closest('#remove-game-filter')){state.gameId='';state.page=0;render();}
     if(event.target.closest('#lab-refresh'))refreshData();
     if(event.target.closest('#history-reload'))reloadHistory();
+    if(event.target.closest('#history-download'))downloadHistory();
   });
   $('#market-rows').addEventListener('keydown',event=>{if(event.target.closest('button'))return;if(event.key==='Enter' || event.key===' '){const row=event.target.closest('[data-market]');if(row){event.preventDefault();state.selected=row.dataset.market;renderRows();renderPanel();}}});
   $('#connect-live').addEventListener('click',()=>state.data?.mode==='demo'?changeMode('live'):setView('lab'));
