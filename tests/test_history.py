@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline regression tests for collection, coverage and feature export. No provider requests."""
 import argparse
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
 import importlib.util
 import io
@@ -39,6 +40,86 @@ class FakeResponse:
 
     def __exit__(self, *args):
         pass
+
+
+
+HOOPR_BOX_HEADER = ["game_id", "athlete_id", "athlete_display_name", "team_abbreviation", "starter",
+                    "did_not_play", "minutes", "points", "field_goals_made", "field_goals_attempted",
+                    "three_point_field_goals_made", "three_point_field_goals_attempted", "free_throws_made",
+                    "free_throws_attempted", "offensive_rebounds", "total_rebounds", "assists", "steals",
+                    "blocks", "turnovers", "personal_fouls", "game_date", "home_team_abbreviation",
+                    "away_team_abbreviation", "season_type"]
+HOOPR_PBP_HEADER = ["game_id", "text", "type_text", "period_number", "clock_display_value", "scoring_play",
+                    "score_value", "away_score", "home_score", "athlete_id_1"]
+
+
+def hoopr_rows(game_id, date_value, home, away, scorer_home=True):
+    box, pbp = [], []
+    for team, base in ((away, 100), (home, 200)):
+        for i in range(7):
+            athlete = base + i
+            starter = i < 5
+            points = (12 if i == 0 else 6) if starter else 3
+            box.append([game_id, athlete, f"Player {athlete}", team, "TRUE" if starter else "FALSE",
+                        "FALSE", "30" if starter else "10", points, 4, 8, 1, 3, 2, 2, 1, 4, 3, 1, 0, 1, 2,
+                        date_value, home, away, 2])
+    scorer = 200 if scorer_home else 100
+    pbp.append([game_id, "Opening tip", "Jump Ball", 1, "12:00", "FALSE", 0, 0, 0, ""])
+    pbp.append([game_id, "First scorer makes layup", "Layup Shot", 1, "11:40", "TRUE", 2,
+                0 if scorer_home else 2, 2 if scorer_home else 0, scorer])
+    pbp.append([game_id, "Reply basket", "Jump Shot", 1, "11:20", "TRUE", 2, 2, 2, 100 if scorer_home else 200])
+    return box, pbp
+
+
+class HoopRIngestTests(unittest.TestCase):
+    def write_csv(self, directory, name, header, rows):
+        import csv as csv_module
+        path = Path(directory) / name
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv_module.writer(handle)
+            writer.writerow(header)
+            writer.writerows(rows)
+        return path
+
+    def test_hoopr_csvs_build_features_with_first_basket(self):
+        box, pbp = hoopr_rows("401000001", "2024-01-05", "LAL", "GSW", scorer_home=True)
+        box2, pbp2 = hoopr_rows("401000002", "2024-01-06", "LAL", "GSW", scorer_home=False)
+        with tempfile.TemporaryDirectory() as directory:
+            box_path = self.write_csv(directory, "player_box_2024.csv", HOOPR_BOX_HEADER, box + box2)
+            pbp_path = self.write_csv(directory, "play_by_play_2024.csv", HOOPR_PBP_HEADER, pbp + pbp2)
+            output = Path(directory) / "history"
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(out):
+                result = history.main(["hoopr", "--permission-confirmed", "--season", "2024",
+                               "--player-box-csv", str(box_path), "--pbp-csv", str(pbp_path),
+                               "--output", str(output), "--as-of", "2024-02-01"])
+            self.assertEqual(result, 0, out.getvalue())
+            archive = history.Archive(output)
+            try:
+                metadata = archive.status()
+            finally:
+                archive.db.close()
+            self.assertEqual(metadata["games"], 2)
+            self.assertEqual(metadata["events"], 6)
+            players = {}
+            for line in (output / "features.jsonl").read_text().splitlines():
+                record = json.loads(line)
+                if record.get("recordType") == "player":
+                    players[record["feature"]["name"]] = record["feature"]
+            self.assertEqual(len(players["Player 200"]["logs"]), 2)
+            # History is newest-first: game 2 was won by the away scorer (100), game 1 by the home scorer (200).
+            self.assertEqual([entry["win"] for entry in players["Player 200"]["firstBasketHistory"]], [False, True])
+            self.assertEqual([entry["win"] for entry in players["Player 100"]["firstBasketHistory"]], [True, False])
+
+    def test_hoopr_missing_column_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_csv(directory, "bad.csv", ["game_id", "athlete_id"], [["1", "2"]])
+            error = io.StringIO()
+            with redirect_stderr(error):
+                result = history.main(["hoopr", "--permission-confirmed", "--season", "2024",
+                               "--player-box-csv", str(path), "--output", str(Path(directory) / "h")])
+            self.assertEqual(result, 1)
+            self.assertIn("missing column", error.getvalue())
 
 
 class HistoryTests(unittest.TestCase):

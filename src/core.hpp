@@ -5,7 +5,7 @@
 
 namespace edgecourt {
 using json = nlohmann::json;
-constexpr const char *VERSION = "0.2.0";
+constexpr const char *VERSION = "0.3.0";
 constexpr const char *MODEL_VERSION = "weighted-bootstrap-v1-experimental";
 
 std::string now_iso();

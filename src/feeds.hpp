@@ -27,6 +27,10 @@ void parse_espn_roster(const json &document, json &snapshot, const std::string &
 void parse_player_logs(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_team_logs(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_team_ratings(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_polymarket_events(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_kalshi_markets(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_pinnacle_markets(const json &matchups, const json &markets, json &snapshot,
+                            const std::string &fetched_at);
 json scrape_saved_html(const std::string &html, const std::string &player = "", const std::string &team = "",
                        const std::string &observed_at = "");
 class PublicFeeds {

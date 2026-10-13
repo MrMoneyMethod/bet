@@ -112,3 +112,25 @@ At least 12 regular-season player/team games and the existing price/stat freshne
 Raw tables must contain both complete basic box scores, explicit historical starter sections, required nonmissing stats, all period starts/ends and a final PBP score matching the box score. Invalid games are tracked rather than replaced with fabricated data. Provider schema changes require inspection and updated fixtures. Source completeness cannot be established solely from final-score agreement.
 
 Keep archives in the ignored `edgecourt-data/` directory, or external storage. Do not commit or distribute raw provider datasets or put them in releases. The fixture generators under `tests/` are synthetic software tests, not historical research inputs.
+
+## Keyless alternative: SportsDataverse / hoopR CSVs
+
+The hoopR project publishes the same class of historical data (ESPN-sourced
+play-by-play 2002-present and player box scores) as open GitHub release datasets.
+Download the per-season CSVs on your own machine, for example:
+
+```bash
+gh release download espn_nba_pbp --repo sportsdataverse/sportsdataverse-data --pattern 'play_by_play_2024.csv'
+gh release download espn_nba_player_boxscores --repo sportsdataverse/sportsdataverse-data --pattern 'player_box_2024.csv'
+python3 scripts/basketball_reference_history.py hoopr --permission-confirmed \
+  --season 2024 --player-box-csv player_box_2024.csv --pbp-csv play_by_play_2024.csv \
+  --output edgecourt-data/history --as-of 2024-06-01
+```
+
+The importer matches games by CSV game id, requires exactly five starters per team
+and home/away columns, and verifies the first field goal against the archived
+play-by-play. Unknown or renamed hoopR headers fail loudly with the missing-column
+list. Player ids are namespaced `espn-...` so the datasets never collide; the
+app-side name crosswalk is unchanged. (GitHub release assets could not be downloaded
+inside the development sandbox, so the importer is tested against fixtures written
+to the hoopR schema; run it once locally to validate the current season's headers.)

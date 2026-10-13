@@ -9,6 +9,7 @@ See docs/HISTORICAL_DATA.md for permissions, coverage and model limitations.
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -518,6 +519,15 @@ class Archive:
             self.db.execute("UPDATE games SET status='complete',error='',document=?,season_type=? WHERE id=?",
                             (json.dumps(game, ensure_ascii=False), game["seasonType"], game["id"]))
 
+    def finish_external(self, game: dict, events: list[dict]):
+        """Archive a game document built from an external open dataset (hoopR)."""
+        with self.db:
+            self.db.execute("DELETE FROM events WHERE game_id=?", (game["id"],))
+            self.db.executemany("INSERT INTO events VALUES (?,?,?)",
+                                [(game["id"], event["sequence"], json.dumps(event, ensure_ascii=False)) for event in events])
+            self.db.execute("UPDATE games SET status='complete',error='',document=?,season_type=? WHERE id=?",
+                            (json.dumps(game, ensure_ascii=False), game["seasonType"], game["id"]))
+
     def status(self):
         summary = self.db.execute("SELECT COUNT(*) games, MIN(date) first_date, MAX(date) last_date FROM games WHERE status='complete'").fetchone()
         pending = self.db.execute("SELECT COUNT(*) FROM games WHERE status!='complete'").fetchone()[0]
@@ -791,6 +801,216 @@ def possession_estimate(game: dict) -> float:
     return sum(t["fga"] - t["oreb"] + t["turnovers"] + 0.44 * t["fta"] for t in game["totals"].values()) / 2
 
 
+
+# ---------------------------------------------------------------------------
+# hoopR / SportsDataverse open-dataset ingest (local CSV files, no scraping).
+# Files come from the public sportsdataverse-data GitHub releases
+# (espn_nba_pbp / espn_nba_player_boxscores). ESPN-sourced data; the user is
+# responsible for having the right to use their downloaded copies.
+# ---------------------------------------------------------------------------
+def _truthy(value) -> bool:
+    return str(value).strip().lower() in ("true", "1", "t", "yes")
+
+
+def _stat(row, key, aliases_map):
+    actual = aliases_map.get(key)
+    if actual is None:
+        return 0
+    value = row.get(actual, "")
+    try:
+        return int(float(str(value).strip() or 0))
+    except ValueError:
+        return 0
+
+
+HOOPR_BOX_FIELDS = {
+    "points": ["points", "pts"], "threes": ["three_point_field_goals_made", "3pt_field_goals_made", "fg3"],
+    "threeAttempts": ["three_point_field_goals_attempted", "3pt_field_goals_attempted", "fg3a"],
+    "fgm": ["field_goals_made", "fg"], "fga": ["field_goals_attempted", "fga"],
+    "ftm": ["free_throws_made", "ft"], "fta": ["free_throws_attempted", "fta"],
+    "oreb": ["offensive_rebounds", "orb"], "rebounds": ["total_rebounds", "rebounds", "trb"],
+    "assists": ["assists", "ast"], "steals": ["steals", "stl"], "blocks": ["blocks", "blk"],
+    "turnovers": ["turnovers", "tov"], "fouls": ["personal_fouls", "fouls", "pf"],
+}
+ESPN_TEAM_ALIASES = {"GS": "GSW", "NY": "NYK", "SA": "SAS", "NO": "NOP", "UTAH": "UTA", "WSH": "WAS"}
+
+
+def _hoopr_team(value: str) -> str:
+    return canonical_team(ESPN_TEAM_ALIASES.get(str(value).strip().upper(), str(value).strip().upper()))
+
+
+def ingest_hoopr(archive: Archive, args) -> None:
+    if not args.player_box_csv:
+        raise ParseError("Provide at least one --player-box-csv file from the espn_nba_player_boxscores release")
+    games: dict[str, dict] = {}
+    order: list[str] = []
+    for path in args.player_box_csv:
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None:
+                raise ParseError(f"{path}: empty CSV")
+            probe = {"__probe__": 1}
+            keys = {str(k).strip().lower(): k for k in reader.fieldnames}
+            def resolve(aliases, label, required=True):
+                for alias in aliases:
+                    if alias in keys:
+                        return keys[alias]
+                if required:
+                    raise ParseError(f"{path}: hoopR CSV missing column for {label}; looked for {aliases}. Available: {sorted(keys)}")
+                return None
+            cols = {"game": resolve(["game_id"], "game id"), "athlete": resolve(["athlete_id"], "athlete id"),
+                    "name": resolve(["athlete_display_name", "display_name", "name"], "athlete name"),
+                    "team": resolve(["team_abbreviation", "team_abbr"], "team"),
+                    "starter": resolve(["starter"], "starter flag"),
+                    "dnp": resolve(["did_not_play"], "did-not-play flag", False),
+                    "minutes": resolve(["minutes", "min"], "minutes"),
+                    "date": resolve(["game_date", "date"], "game date", False),
+                    "home": resolve(["home_team_abbreviation", "home_team_abbr"], "home team", False),
+                    "away": resolve(["away_team_abbreviation", "away_team_abbr"], "away team", False),
+                    "season_type": resolve(["season_type"], "season type", False)}
+            stat_cols = {field_name: resolve(aliases, field_name, False) for field_name, aliases in HOOPR_BOX_FIELDS.items()}
+            stat_cols = {k: v for k, v in stat_cols.items() if v}
+            for field_name in ("points", "fgm", "fga", "fta", "oreb", "turnovers"):
+                if field_name not in stat_cols:
+                    raise ParseError(f"{path}: hoopR CSV missing required stat column {field_name}")
+            for row in reader:
+                game_id = str(row[cols["game"]]).strip()
+                if not game_id:
+                    continue
+                game = games.get(game_id)
+                if game is None:
+                    game = games[game_id] = {"id": game_id, "season": args.season, "players": [],
+                                             "date": "", "home": "", "away": "", "seasonType": "regular"}
+                    order.append(game_id)
+                if cols["date"] and not game["date"]:
+                    game["date"] = str(row[cols["date"]]).strip()[:10]
+                if cols["home"] and not game["home"]:
+                    game["home"] = _hoopr_team(row[cols["home"]])
+                if cols["away"] and not game["away"]:
+                    game["away"] = _hoopr_team(row[cols["away"]])
+                if cols["season_type"]:
+                    game["seasonType"] = "playoffs" if str(row[cols["season_type"]]).strip() in ("3", "playoffs") else "regular"
+                team = _hoopr_team(row[cols["team"]])
+                starter = _truthy(row[cols["starter"]])
+                minutes_raw = str(row[cols["minutes"]]).strip()
+                try:
+                    minutes_value = float(minutes_raw or 0)
+                except ValueError:
+                    minutes_value = 0.0
+                if (cols["dnp"] and _truthy(row[cols["dnp"]])) or (minutes_value <= 0 and not starter):
+                    continue
+                if starter and minutes_value <= 0:
+                    raise ParseError(f"{game_id}: hoopR starter with no minutes; refusing to guess the lineup")
+                log = {"date": game["date"] or "0000-00-00", "gameId": game_id,
+                       "home": team == (game["home"] or team), "minutes": minutes_value}
+                for field_name in HOOPR_BOX_FIELDS:
+                    log[field_name] = _stat(row, field_name, stat_cols)
+                player_id = "espn-" + str(row[cols["athlete"]]).strip()
+                game["players"].append({"id": player_id, "name": str(row[cols["name"]]).strip(),
+                                        "team": team, "starter": starter, "log": log})
+    # Play-by-play (optional but required for verified first-basket features).
+    pbp: dict[str, list[dict]] = defaultdict(list)
+    first_fg: dict[str, dict] = {}
+    for path in args.pbp_csv or []:
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None:
+                raise ParseError(f"{path}: empty CSV")
+            keys = {str(k).strip().lower(): k for k in reader.fieldnames}
+            def resolve(aliases, label, required=True):
+                for alias in aliases:
+                    if alias in keys:
+                        return keys[alias]
+                if required:
+                    raise ParseError(f"{path}: hoopR PBP CSV missing column for {label}; looked for {aliases}. Available: {sorted(keys)}")
+                return None
+            cols = {"game": resolve(["game_id"], "game id"),
+                    "text": resolve(["text", "play_text", "description"], "play text"),
+                    "type": resolve(["type_text"], "play type", False),
+                    "period": resolve(["period_number", "period"], "period"),
+                    "clock": resolve(["clock_display_value", "clock"], "clock", False),
+                    "scoring": resolve(["scoring_play"], "scoring flag", False),
+                    "value": resolve(["score_value"], "score value", False),
+                    "away_score": resolve(["away_score"], "away score", False),
+                    "home_score": resolve(["home_score"], "home score", False),
+                    "athlete": resolve(["athlete_id_1"], "primary athlete", False),
+                    "home": resolve(["home_team_abbreviation", "home_team_abbr"], "home team", False),
+                    "away": resolve(["away_team_abbreviation", "away_team_abbr"], "away team", False)}
+            for row in reader:
+                game_id = str(row[cols["game"]]).strip()
+                game = games.get(game_id)
+                if game is None:
+                    continue
+                if cols["home"] and not game["home"]:
+                    game["home"] = _hoopr_team(row[cols["home"]])
+                if cols["away"] and not game["away"]:
+                    game["away"] = _hoopr_team(row[cols["away"]])
+                try:
+                    period = int(float(str(row[cols["period"]]).strip() or 1))
+                except ValueError:
+                    continue
+                scoring = _truthy(row[cols["scoring"]]) if cols["scoring"] else False
+                try:
+                    value = int(float(str(row[cols["value"]]).strip() or 0)) if cols["value"] else 0
+                except ValueError:
+                    value = 0
+                athlete = str(row[cols["athlete"]]).strip() if cols["athlete"] else ""
+                event = {"sequence": len(pbp[game_id]) + 1, "period": period,
+                         "clock": str(row[cols["clock"]]).strip() if cols["clock"] else "",
+                         "description": str(row[cols["text"]]).strip(),
+                         "type": ("made_free_throw" if value == 1 else "made_field_goal") if scoring and value else "other",
+                         "playerId": ("espn-" + athlete) if athlete else None,
+                         "awayScore": _stat(row, "x", {"x": cols["away_score"]}) if cols["away_score"] else None,
+                         "homeScore": _stat(row, "x", {"x": cols["home_score"]}) if cols["home_score"] else None}
+                pbp[game_id].append(event)
+                if scoring and value >= 2 and game_id not in first_fg and event["playerId"]:
+                    first_fg[game_id] = {"playerId": event["playerId"], "period": period,
+                                         "clock": event["clock"], "description": event["description"]}
+    archive.set_meta("sources", "sportsdataverse hoopR ESPN play-by-play + player box scores (local CSV ingest)")
+    discovered, completed, rejected = {}, 0, 0
+    for game_id in order:
+        game = games[game_id]
+        try:
+            teams = {p["team"] for p in game["players"]}
+            if len(teams) != 2 or not game["date"] or not game["home"] or not game["away"]:
+                raise ParseError("Missing date or home/away teams; provide schedule columns in the CSVs")
+            if game["home"] not in teams or game["away"] not in teams or game["home"] == game["away"]:
+                raise ParseError("Home/away columns disagree with player team columns")
+            for player in game["players"]:
+                player["log"]["date"] = game["date"]
+                player["log"]["home"] = player["team"] == game["home"]
+            totals = {}
+            for team in (game["home"], game["away"]):
+                roster = [p for p in game["players"] if p["team"] == team]
+                if sum(p["starter"] for p in roster) != 5:
+                    raise ParseError("Historical starting lineup is not exactly five per team")
+                totals[team] = {field_name: sum(p["log"][field_name] for p in roster) for field_name in HOOPR_BOX_FIELDS}
+            events = pbp.get(game_id, [])
+            maximum_period = max((e["period"] for e in events), default=4)
+            scorer_ids = {p["id"] for p in game["players"]}
+            fg = first_fg.get(game_id)
+            monotone = all((events[i]["awayScore"] or 0) >= (events[i - 1]["awayScore"] or 0) and
+                           (events[i]["homeScore"] or 0) >= (events[i - 1]["homeScore"] or 0)
+                           for i in range(1, len(events))) if events else False
+            document = {"id": game_id, "season": args.season, "date": game["date"], "home": game["home"],
+                        "away": game["away"], "seasonType": game["seasonType"], "players": game["players"],
+                        "totals": totals,
+                        "durationMinutes": 48 + max(0, maximum_period - 4) * 5,
+                        "firstFieldGoal": fg if (fg and fg["playerId"] in scorer_ids and monotone) else None,
+                        "firstFieldGoalVerified": bool(fg and fg["playerId"] in scorer_ids and monotone),
+                        "sourceUrl": "https://github.com/sportsdataverse/sportsdataverse-data/releases"}
+            discovered[game_id] = document
+            archive.discover({game_id: document})
+            archive.finish_external(document, events)
+            completed += 1
+        except ParseError as error:
+            rejected += 1
+            print(f"hoopR {game_id}: rejected: {error}", file=sys.stderr)
+    if not completed:
+        raise ParseError("No hoopR games could be archived; see rejections above")
+    print(f"hoopR ingest: {completed} games archived, {rejected} rejected, {sum(len(v) for v in pbp.values())} PBP events")
+
+
 def export_features(archive: Archive, as_of: date, recent_days=210):
     """All events stay archived; export only model-sized, strictly pre-cutoff features."""
     cutoff = as_of.isoformat()
@@ -866,7 +1086,8 @@ def export_features(archive: Archive, as_of: date, recent_days=210):
     metadata = {**archive.status(), "asOf": cutoff, "exportedAt": utc_now(),
                 "recentDays": recent_days, "players": sum(r["recordType"] == "player" for r in records),
                 "teams": sum(r["recordType"] == "team" for r in records)}
-    manifest = {"recordType": "manifest", "schemaVersion": 1, "source": "basketball_reference", "metadata": metadata}
+    manifest = {"recordType": "manifest", "schemaVersion": 1,
+                "source": archive.meta("sources") or "basketball_reference", "metadata": metadata}
     target = archive.directory / "features.jsonl"
     temp = target.with_suffix(".tmp")
     with temp.open("w", encoding="utf-8", newline="\n") as output:
@@ -888,13 +1109,13 @@ def main(argv=None):
     today = datetime.now(timezone.utc).date()
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("crawl", "ingest", "export", "status"):
+    for name in ("crawl", "ingest", "hoopr", "export", "status"):
         sub = commands.add_parser(name)
         sub.add_argument("--output", type=Path, default=Path("edgecourt-data/history"), help="Local archive directory (keep outside Git)")
         if name != "status":
             sub.add_argument("--as-of", type=date.fromisoformat, default=today, help="Exclusive feature cutoff YYYY-MM-DD; never includes the target day")
             sub.add_argument("--recent-days", type=int, default=210, help="Select recently active players; archive retains all collected seasons")
-        if name in ("crawl", "ingest"):
+        if name in ("crawl", "ingest", "hoopr"):
             permission(sub)
         if name == "crawl":
             sub.add_argument("--start-season", type=int, default=1997, help="Season ending year; default 1996-97 play-by-play era")
@@ -906,8 +1127,12 @@ def main(argv=None):
         if name == "ingest":
             sub.add_argument("--saved-html", type=Path, required=True, help="Root with leagues/ and paired boxscores/pbp/ saved pages")
             sub.add_argument("--season", type=int, help="Season ending year if saved schedules are absent")
+        if name == "hoopr":
+            sub.add_argument("--pbp-csv", type=Path, action="append", default=[], help="play_by_play_{season}.csv from the sportsdataverse-data espn_nba_pbp release")
+            sub.add_argument("--player-box-csv", type=Path, action="append", default=[], help="player_box_{season}.csv from the espn_nba_player_boxscores release")
+            sub.add_argument("--season", type=int, required=True, help="Season ending year of the CSV files (ESPN play-by-play era 2002+)")
     args = parser.parse_args(argv)
-    if args.command in ("crawl", "ingest") and not args.permission_confirmed:
+    if args.command in ("crawl", "ingest", "hoopr") and not args.permission_confirmed:
         parser.error("No collection performed. Confirm that you have permission with --permission-confirmed. Read https://www.sports-reference.com/data_use.html first.")
     if args.command != "status" and not 1 <= args.recent_days <= 365:
         parser.error("--recent-days must be 1..365")
@@ -915,6 +1140,8 @@ def main(argv=None):
         parser.error("Use supported season ending years 1997..current season, a nonnegative limit and delay")
     if args.command == "ingest" and args.season and not 1997 <= args.season <= today.year + 1:
         parser.error("--season must be a supported season ending year")
+    if args.command == "hoopr" and not 2002 <= args.season <= today.year + 1:
+        parser.error("hoopR ESPN play-by-play covers season ending years 2002..current season")
     if args.command != "status" and args.as_of > today:
         parser.error("--as-of cannot be in the future")
     try:
@@ -929,6 +1156,8 @@ def main(argv=None):
                         crawl(archive, args)
                     elif args.command == "ingest":
                         ingest(archive, args)
+                    elif args.command == "hoopr":
+                        ingest_hoopr(archive, args)
                 except (AccessStopped, KeyboardInterrupt) as error:
                     archive.set_meta("lastError", str(error) or "Collection interrupted; resume from cached pages")
                     export_features(archive, args.as_of, args.recent_days)

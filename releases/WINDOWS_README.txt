@@ -1,4 +1,4 @@
-EDGECOURT 0.2.0 - WINDOWS 10/11 x64
+EDGECOURT 0.3.0 - WINDOWS 10/11 x64
 ==================================
 
 1. Extract this ZIP to a folder you control.

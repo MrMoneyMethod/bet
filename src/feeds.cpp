@@ -220,8 +220,9 @@ void walk_espn(const json &node, json &snapshot, int depth = 0) {
 
 bool allowed_data_url(const std::string &url) {
     static const std::regex expression(
-        "^https://(site\\.api\\.espn\\.com|cdn\\.nba\\.com|stats\\.nba\\.com|www\\.espn\\.com)/[^\\r\\n\\t "
-        "]*$");
+        "^https://(site\\.api\\.espn\\.com|cdn\\.nba\\.com|stats\\.nba\\.com|www\\.espn\\.com|"
+        "gamma-api\\.polymarket\\.com|external-api\\.kalshi\\.com|guest\\.api\\.arcadia\\.pinnacle\\.com)"
+        "/[^\\r\\n\\t \"]*$");
     return url.size() < 4096 && std::regex_match(url, expression);
 }
 HttpResponse public_get(const std::string &url) {
@@ -779,6 +780,251 @@ void parse_team_logs(const json &doc, json &s, const std::string &fetched) {
     }
 }
 
+namespace {
+// Prediction-market / sharp-book quote helpers. External prices are only kept
+// when they match a scheduled game already in the snapshot; nothing is invented.
+std::string squish(std::string value) {
+    std::string out;
+    for (unsigned char c : value)
+        if (std::isalnum(c))
+            out += static_cast<char>(std::tolower(c));
+    return out;
+}
+std::string abbr_from_name(const std::string &name) {
+    static const std::map<std::string, std::string> names = {{"Atlanta Hawks", "ATL"},
+                                                             {"Boston Celtics", "BOS"},
+                                                             {"Brooklyn Nets", "BKN"},
+                                                             {"Charlotte Hornets", "CHA"},
+                                                             {"Chicago Bulls", "CHI"},
+                                                             {"Cleveland Cavaliers", "CLE"},
+                                                             {"Dallas Mavericks", "DAL"},
+                                                             {"Denver Nuggets", "DEN"},
+                                                             {"Detroit Pistons", "DET"},
+                                                             {"Golden State Warriors", "GSW"},
+                                                             {"Houston Rockets", "HOU"},
+                                                             {"Indiana Pacers", "IND"},
+                                                             {"LA Clippers", "LAC"},
+                                                             {"Los Angeles Clippers", "LAC"},
+                                                             {"Los Angeles Lakers", "LAL"},
+                                                             {"Memphis Grizzlies", "MEM"},
+                                                             {"Miami Heat", "MIA"},
+                                                             {"Milwaukee Bucks", "MIL"},
+                                                             {"Minnesota Timberwolves", "MIN"},
+                                                             {"New Orleans Pelicans", "NOP"},
+                                                             {"New York Knicks", "NYK"},
+                                                             {"Oklahoma City Thunder", "OKC"},
+                                                             {"Orlando Magic", "ORL"},
+                                                             {"Philadelphia 76ers", "PHI"},
+                                                             {"Phoenix Suns", "PHX"},
+                                                             {"Portland Trail Blazers", "POR"},
+                                                             {"Sacramento Kings", "SAC"},
+                                                             {"San Antonio Spurs", "SAS"},
+                                                             {"Toronto Raptors", "TOR"},
+                                                             {"Utah Jazz", "UTA"},
+                                                             {"Washington Wizards", "WAS"}};
+    const auto flat = squish(name);
+    for (const auto &entry : names)
+        if (squish(entry.first) == flat)
+            return entry.second;
+    // Nickname-only labels ("Lakers") match when the label is the name's tail.
+    for (const auto &entry : names) {
+        const auto full = squish(entry.first);
+        if (flat.size() >= 4 && full.size() > flat.size() &&
+            full.compare(full.size() - flat.size(), flat.size(), flat) == 0)
+            return entry.second;
+    }
+    return canonical_team(name);
+}
+json array_field(const json &value) {
+    if (value.is_array())
+        return value;
+    if (value.is_string()) {
+        try {
+            auto parsed = json::parse(value.get<std::string>());
+            if (parsed.is_array())
+                return parsed;
+        } catch (...) {
+        }
+    }
+    return json::array();
+}
+const json *find_game(const json &snapshot, const std::string &home, const std::string &away) {
+    for (const auto &game : snapshot["games"])
+        if (game.value("home", "") == home && game.value("away", "") == away)
+            return &game;
+    return nullptr;
+}
+bool within_days(const std::string &a, const std::string &b, long long days) {
+    const auto ta = parse_time(a), tb = parse_time(b);
+    return ta > 0 && tb > 0 && std::llabs(ta - tb) <= days * 86400;
+}
+void add_external_quote(json &snapshot, json quote) {
+    quote["id"] = quote_id(quote);
+    for (auto &old : snapshot["quotes"])
+        if (old.value("id", "") == quote.value("id", "")) {
+            old = quote;
+            return;
+        }
+    snapshot["quotes"].push_back(std::move(quote));
+}
+json external_moneyline(const json &game, const std::string &team, const std::string &side,
+                        const std::string &book, const std::string &source_name, const std::string &fetched,
+                        const std::string &url) {
+    return {{"gameId", game.value("id", "")},
+            {"market", "moneyline"},
+            {"player", ""},
+            {"team", team},
+            {"side", side},
+            {"line", nullptr},
+            {"book", book},
+            {"observedAt", fetched},
+            {"timestampKind", "retrieved"},
+            {"source", source_name},
+            {"status", "open"},
+            {"settlement", "full_game_including_ot"},
+            {"demo", false},
+            {"sourceUrl", url}};
+}
+} // namespace
+void parse_polymarket_events(const json &doc, json &s, const std::string &fetched) {
+    if (!doc.is_array())
+        return;
+    for (const auto &event : doc) {
+        if (!event.is_object())
+            continue;
+        const auto slug = event.value("slug", "");
+        for (const auto &market : array_field(event.value("markets", json()))) {
+            if (!market.is_object() || market.value("closed", false) || !market.value("active", true))
+                continue;
+            // Game winner markets only: spreads/totals/futures never map onto app markets.
+            const auto type = market.value("sportsMarketType", "");
+            if (!type.empty() && type != "moneyline")
+                continue;
+            auto outcomes = array_field(market.value("outcomes", json())),
+                 prices = array_field(market.value("outcomePrices", json()));
+            if (outcomes.size() != 2 || prices.size() != 2)
+                continue;
+            std::string abbr[2];
+            double price[2];
+            for (int i = 0; i < 2; ++i) {
+                abbr[i] = abbr_from_name(text(outcomes[i]));
+                price[i] = number(prices[i], -1);
+                if (abbr[i].empty() || price[i] <= 0.001 || price[i] >= 0.999)
+                    break;
+            }
+            if (abbr[0].empty() || abbr[1].empty() || abbr[0] == abbr[1] || price[0] <= 0.001 ||
+                price[1] <= 0.001 || price[0] >= 0.999 || price[1] >= 0.999)
+                continue;
+            const json *game = find_game(s, abbr[0], abbr[1]);
+            std::string home = abbr[0], away = abbr[1];
+            if (!game) {
+                game = find_game(s, abbr[1], abbr[0]);
+                home = abbr[1];
+                away = abbr[0];
+            }
+            if (!game || !within_days(game->value("startsAt", ""), market.value("endDate", ""), 2))
+                continue;
+            for (int i = 0; i < 2; ++i) {
+                auto q = external_moneyline(*game, abbr[i], abbr[i] == home ? "home" : "away", "Polymarket",
+                                            "polymarket", fetched, "https://polymarket.com/event/" + slug);
+                q["oddsPercent"] = price[i] * 100;
+                q["americanOdds"] = nullptr;
+                add_external_quote(s, q);
+            }
+        }
+    }
+}
+void parse_kalshi_markets(const json &doc, json &s, const std::string &fetched) {
+    static const std::regex event_pattern(R"(^KXNBAGAME-[0-9]{2}[A-Z]{3}[0-9]{2}([A-Z]{6})$)");
+    for (const auto &market : doc.value("markets", json::array())) {
+        if (!market.is_object())
+            continue;
+        const auto status = market.value("status", "");
+        if (status != "active" && status != "open")
+            continue;
+        std::smatch match;
+        const auto event_ticker = market.value("event_ticker", "");
+        if (!std::regex_match(event_ticker, match, event_pattern))
+            continue;
+        const auto pair = match[1].str();
+        const auto away = canonical_team(pair.substr(0, 3)), home = canonical_team(pair.substr(3, 3));
+        const auto ticker = market.value("ticker", "");
+        const auto dash = ticker.rfind('-');
+        if (dash == std::string::npos)
+            continue;
+        const auto winner = canonical_team(ticker.substr(dash + 1));
+        if (winner != home && winner != away)
+            continue;
+        const json *game = find_game(s, home, away);
+        if (!game || !within_days(game->value("startsAt", ""), market.value("occurrence_datetime", ""), 2))
+            continue;
+        // Traded probability: prefer the two-sided midpoint, else the last trade.
+        const double bid = number(market.value("yes_bid_dollars", json()), -1),
+                     ask = number(market.value("yes_ask_dollars", json()), -1);
+        double price =
+            (bid > 0 && ask > bid) ? (bid + ask) / 2 : number(market.value("last_price_dollars", json()), -1);
+        if (price <= 0.01 || price >= 0.99)
+            continue;
+        auto q = external_moneyline(*game, winner, winner == home ? "home" : "away", "Kalshi", "kalshi",
+                                    fetched, "https://kalshi.com/markets/kxnbagame");
+        q["oddsPercent"] = price * 100;
+        q["americanOdds"] = nullptr;
+        add_external_quote(s, q);
+    }
+}
+void parse_pinnacle_markets(const json &matchups, const json &markets, json &s, const std::string &fetched) {
+    std::map<long long, json> participants;
+    std::map<long long, json> games_by_matchup;
+    for (const auto &matchup : array_field(matchups)) {
+        if (!matchup.is_object() || matchup.value("type", "matchup") != "matchup")
+            continue;
+        std::string home, away;
+        for (const auto &participant : array_field(matchup.value("participants", json()))) {
+            const auto abbr = abbr_from_name(participant.value("name", ""));
+            if (abbr.empty())
+                continue;
+            participants[static_cast<long long>(number(participant.value("id", json()), -1))] = {
+                {"abbr", abbr}, {"alignment", participant.value("alignment", "")}};
+            if (participant.value("alignment", "") == "home")
+                home = abbr;
+            else if (participant.value("alignment", "") == "away")
+                away = abbr;
+        }
+        if (!home.empty() && !away.empty())
+            games_by_matchup[static_cast<long long>(number(matchup.value("id", json()), -1))] = {
+                {"home", home},
+                {"away", away},
+                {"startsAt", matchup.value("startTime", matchup.value("startsAt", ""))}};
+    }
+    for (const auto &market : array_field(markets)) {
+        if (!market.is_object() || market.value("key", "") != "s;0;m" ||
+            market.value("status", "open") == "suspended")
+            continue;
+        const auto found =
+            games_by_matchup.find(static_cast<long long>(number(market.value("matchupId", json()), -1)));
+        if (found == games_by_matchup.end())
+            continue;
+        const json *game = find_game(s, found->second["home"], found->second["away"]);
+        if (!game || !within_days(game->value("startsAt", ""), found->second.value("startsAt", ""), 2))
+            continue;
+        for (const auto &price_entry : array_field(market.value("prices", json()))) {
+            const auto participant = participants.find(
+                static_cast<long long>(number(price_entry.value("participantId", json()), -1)));
+            if (participant == participants.end())
+                continue;
+            const double raw = number(price_entry.value("price", json()), 0);
+            if (raw == 0 || (raw > -100 && raw < 100) || std::floor(raw) != raw)
+                continue;
+            auto q = external_moneyline(*game, participant->second["abbr"],
+                                        participant->second.value("alignment", ""), "Pinnacle", "pinnacle",
+                                        fetched, "https://www.pinnacle.com/");
+            if (q.value("side", "") != "home" && q.value("side", "") != "away")
+                continue;
+            q["americanOdds"] = static_cast<int>(raw);
+            add_external_quote(s, q);
+        }
+    }
+}
 json scrape_saved_html(const std::string &html, const std::string &player, const std::string &team,
                        const std::string &observed_at) {
     if (html.size() > 4 * 1024 * 1024)
@@ -896,7 +1142,7 @@ FeedResponse PublicFeeds::get(const std::string &url, int ttl, int max_stale) {
         response.cached = true;
         return response;
     }
-    if (requests_ >= 24) {
+    if (requests_ >= 36) {
         response.error = "Per-refresh public-source request budget reached";
     } else {
         if (requests_ > 0)
@@ -949,7 +1195,7 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     // A fixed public-page scraper, not a challenge bypass: only use it when the JSON
     // endpoint changes its contract (404 / successful unsupported body), never after 403/429.
     if ((espn.status == 404 || espn.status == 200) &&
-        (espn.data.is_null() || !espn.data.contains("events")) && requests_ < 24 &&
+        (espn.data.is_null() || !espn.data.contains("events")) && requests_ < 36 &&
         !(cancelled_ && cancelled_->load())) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         ++requests_;
@@ -1097,6 +1343,61 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
          {"count", 0},
          {"message", "There is no bundled reliable free/keyless all-books prop feed. Import current CSV/JSON "
                      "quotes. First basket also requires explicit history and confirmed starters."}});
+    // Keyless traded/sharp moneyline prices. Only quotes matching an already
+    // scheduled game are kept; these venues publish probabilities/American prices,
+    // never player statistics, and their prices are indicative exchange/book prices.
+    auto polymarket = get(
+        "https://gamma-api.polymarket.com/events?tag_slug=nba&active=true&closed=false&limit=100", 60, 300);
+    int polymarket_count = 0;
+    if (!polymarket.data.is_null()) {
+        const auto before = s["quotes"].size();
+        parse_polymarket_events(polymarket.data, s, polymarket.fetched_at);
+        polymarket_count = static_cast<int>(s["quotes"].size() - before);
+    }
+    s["sources"].push_back(
+        source("polymarket", "Polymarket NBA game prices", polymarket, polymarket_count,
+               "Keyless public prediction-market moneylines (prices are traded "
+               "probabilities). Futures/spreads/totals are ignored; not a sportsbook price."));
+    auto kalshi = get(
+        "https://external-api.kalshi.com/trade-api/v2/markets?series_ticker=KXNBAGAME&status=open&limit=200",
+        60, 300);
+    int kalshi_count = 0;
+    if (!kalshi.data.is_null()) {
+        const auto before = s["quotes"].size();
+        parse_kalshi_markets(kalshi.data, s, kalshi.fetched_at);
+        kalshi_count = static_cast<int>(s["quotes"].size() - before);
+    }
+    s["sources"].push_back(source("kalshi", "Kalshi NBA game prices", kalshi, kalshi_count,
+                                  "Keyless public exchange market data; midpoint of bid/ask when "
+                                  "two-sided, else last trade. Fees/settlement differ from sportsbooks."));
+    int pinnacle_count = 0;
+    auto pinnacle_leagues = get("https://guest.api.arcadia.pinnacle.com/0.1/sports/4/leagues", 600, 7200);
+    FeedResponse pinnacle_state = pinnacle_leagues;
+    if (pinnacle_leagues.data.is_array()) {
+        int leagues_used = 0;
+        for (const auto &league : pinnacle_leagues.data) {
+            const auto name = league.value("name", "");
+            if ((name != "NBA" && name != "NBA Preseason") || leagues_used >= 2)
+                continue;
+            ++leagues_used;
+            const auto league_id =
+                std::to_string(static_cast<long long>(number(league.value("id", json()), -1)));
+            auto matchups = get(
+                "https://guest.api.arcadia.pinnacle.com/0.1/leagues/" + league_id + "/matchups", 120, 600);
+            auto straight = get("https://guest.api.arcadia.pinnacle.com/0.1/leagues/" + league_id +
+                                    "/markets/straight/period/0",
+                                45, 0);
+            pinnacle_state = straight;
+            if (!matchups.data.is_null() && !straight.data.is_null()) {
+                const auto before = s["quotes"].size();
+                parse_pinnacle_markets(matchups.data, straight.data, s, straight.fetched_at);
+                pinnacle_count += static_cast<int>(s["quotes"].size() - before);
+            }
+        }
+    }
+    s["sources"].push_back(source("pinnacle", "Pinnacle NBA moneylines", pinnacle_state, pinnacle_count,
+                                  "Anonymous guest feed used by Pinnacle's public site; American prices "
+                                  "converted to percentages. Undocumented and can change or block."));
     // Keep only players on active teams in the browser workspace. Cache retains full historical responses.
     for (auto it = s["players"].begin(); it != s["players"].end();) {
         auto team = it.value().value("team", "");

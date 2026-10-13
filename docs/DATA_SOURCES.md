@@ -17,6 +17,12 @@ No API keys or sportsbook credentials are requested. Keyless public access is no
 | Optional authorized Basketball Reference history | Local SQLite archive and streaming feature export; historical HTTPS collection is separate from the app | All parsed timed PBP events, paired box-score vectors, dated first-FG opportunities and approximate team environment fallback | No corpus bundled or full crawl run here. Source permission required; coverage/gaps explicit. See [historical setup](HISTORICAL_DATA.md). |
 | User CSV/JSON | Local import only | All requested odds markets; explicit schedules/history/feature overrides | Quote times preserved. Validate accuracy yourself. |
 | User saved HTML | Local data extraction | Embedded ESPN/normalized JSON; Basketball Reference-style game-log tables | No browsing, crawling or script execution |
+| Polymarket moneylines | gamma-api.polymarket.com (keyless) | Game-winner traded probabilities only; futures/spreads/totals ignored | Indicative exchange price; no liquidity/size guarantee |
+| Kalshi moneylines | external-api.kalshi.com trade API (keyless) | NBA game markets matched by structured tickers; bid/ask midpoint else last trade | Indicative exchange price; names in titles truncate, tickers do not |
+| Pinnacle moneylines | guest.api.arcadia.pinnacle.com (anonymous guest feed) | Exact American prices; game totals never mapped to team totals | Undocumented endpoint; may change or block |
+
+The full catalog of investigated keyless sources (probed endpoints, open datasets,
+free-key exclusions and dead ends) is in [KEYLESS_SOURCES.md](KEYLESS_SOURCES.md).
 
 The NBA player endpoint uses the recent 210-day window; histories are limited to 60 recent games per player. If the current-season player response successfully returns zero rows, the prior regular season is requested. A failed/blocked current-season request is **not** treated as proof that a prior-season endpoint will work. Preseason forecasts remain disabled.
 
@@ -56,7 +62,7 @@ The historical SBR reference was reviewed for data/odds separation and parsing p
 
 - HTTPS GET only to a fixed source hostname allowlist; no custom ports, credentials, localhost targets or redirects.
 - Descriptive application user agent; Windows certificate validation remains enabled.
-- Timeouts, 16 MB source-response cap, 4 MB imports, 24 network requests per refresh maximum and at least 250 ms between source requests.
+- Timeouts, 16 MB source-response cap, 4 MB imports, 36 network requests per refresh maximum and at least 250 ms between source requests.
 - Cache avoids refetching season stats/rosters every score refresh.
 - Failed/blocked/rate-limited sources are surfaced in **Model lab → Data sources**. The code does not retry through bypasses.
 - Desktop public-data requests originate on your computer, not in browser JavaScript, avoiding provider CORS requirements.

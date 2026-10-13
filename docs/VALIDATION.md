@@ -7,8 +7,8 @@
 | Check | Result | What it establishes |
 |---|---|---|
 | C++17 Release build, GCC/native CMake | Passed | Native engine, public-data parsers, server and embedded UI compile together. |
-| Core/feed regression executable | **58 passed, 0 failed** | Mathematical contracts, parsing, import validation and eligibility guards; not predictive accuracy. |
-| Offline historical collector unit tests | **17 passed**, synthetic fixtures only | Schedule/table parsing, comment tables, PBP sequence/overtime/first-FG settlement, score/period completeness, SQLite deduplication, feature cutoff, robots/wildcards, rate spacing, caching, permission and single-writer gates. |
+| Core/feed regression executable | **62 passed, 0 failed** (percentage pricing, history bundles, plus new Polymarket/Kalshi/Pinnacle adapter and allowlist fixtures) | Mathematical contracts, parsing, import validation and eligibility guards; not predictive accuracy. |
+| Historical tooling unit tests | **19 passed**, synthetic fixtures only (Basketball Reference collector + hoopR CSV ingest) | Schedule/table parsing, comment tables, PBP sequence/overtime/first-FG settlement, score/period completeness, SQLite deduplication, feature cutoff, robots/wildcards, rate spacing, caching, permission and single-writer gates. |
 | Native historical pipeline | Passed, no provider requests | Generated saved HTML → SQLite/events → streaming feature export → native regular props and first-FG probabilities only after current lineup import; atomic reload/removal and Demo isolation. |
 | CTest | **4/4 passed** | Core/feed/history suite, collector tests, native historical pipeline and real-process HTTP API integration. |
 | Browser interactions, headless Chromium | Passed, including percentage quotes/input/export and history coverage/reload | Desktop and 390px mobile layouts; no JavaScript errors during the tested interactions. |

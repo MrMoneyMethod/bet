@@ -697,6 +697,66 @@ int main() {
         write();
         throws([&] { load_history_bundle(directory); });
     });
+    test("Polymarket game moneylines become percentage quotes; futures/spreads ignored", [&] {
+        auto s = empty_snapshot("live");
+        const auto start = iso_at(parse_time(now_iso()) + 86400);
+        s["games"].push_back({{"id", "g1"}, {"home", "LAL"}, {"away", "GSW"}, {"startsAt", start}});
+        json doc = json::array({
+            {{"slug", "nba-future"}, {"markets", json::array({{{"active", true}, {"closed", false},
+                {"outcomes", "[\"Yes\", \"No\"]"}, {"outcomePrices", "[\"0.4\", \"0.6\"]"}}})}},
+            {{"slug", "nba-gsw-lal"}, {"markets", json::array({
+                {{"active", true}, {"closed", false}, {"sportsMarketType", "spreads"},
+                 {"outcomes", "[\"Golden State Warriors\", \"Los Angeles Lakers\"]"},
+                 {"outcomePrices", "[\"0.5\", \"0.5\"]"}, {"endDate", start}},
+                {{"active", true}, {"closed", false}, {"sportsMarketType", "moneyline"},
+                 {"outcomes", "[\"Golden State Warriors\", \"Los Angeles Lakers\"]"},
+                 {"outcomePrices", "[\"0.42\", \"0.58\"]"}, {"endDate", start}}})}}});
+        parse_polymarket_events(doc, s, now_iso());
+        check(s["quotes"].size() == 2, "Only the moneyline pair is imported");
+        check(s["quotes"][0]["book"] == "Polymarket" && s["quotes"][0]["americanOdds"].is_null(), "Native % price");
+        near(number(s["quotes"][0]["oddsPercent"]), 42.0);
+        near(number(s["quotes"][1]["oddsPercent"]), 58.0);
+        check(s["quotes"][1]["side"] == "home", "Outcome mapped to the scheduled home team");
+    });
+    test("Kalshi NBA game markets use ticker teams and dollar midpoints", [&] {
+        auto s = empty_snapshot("live");
+        s["games"].push_back({{"id", "g2"}, {"home", "LAL"}, {"away", "DEN"}, {"startsAt", "2026-10-17T02:00:00Z"}});
+        json doc = {{"markets", json::array({
+            {{"status", "active"}, {"event_ticker", "KXNBAGAME-26OCT16DENLAL"}, {"ticker", "KXNBAGAME-26OCT16DENLAL-LAL"},
+             {"occurrence_datetime", "2026-10-17T05:00:00Z"}, {"yes_bid_dollars", "0.5000"}, {"yes_ask_dollars", "0.5900"}},
+            {{"status", "active"}, {"event_ticker", "KXNBAGAME-26OCT16DENLAL"}, {"ticker", "KXNBAGAME-26OCT16DENLAL-DEN"},
+             {"occurrence_datetime", "2026-10-17T05:00:00Z"}, {"yes_bid_dollars", "0.3900"}, {"yes_ask_dollars", "0.5000"}},
+            {{"status", "closed"}, {"event_ticker", "KXNBAGAME-26OCT16DENLAL"}, {"ticker", "KXNBAGAME-26OCT16DENLAL-LAL"},
+             {"occurrence_datetime", "2026-10-17T05:00:00Z"}, {"yes_bid_dollars", "0.9000"}, {"yes_ask_dollars", "0.9100"}}})}};
+        parse_kalshi_markets(doc, s, now_iso());
+        check(s["quotes"].size() == 2, "Closed markets are skipped");
+        near(number(s["quotes"][0]["oddsPercent"]), 54.5);
+        near(number(s["quotes"][1]["oddsPercent"]), 44.5);
+        check(s["quotes"][0]["side"] == "home" && s["quotes"][1]["side"] == "away", "Kalshi sides");
+    });
+    test("Pinnacle guest moneylines keep exact American prices and ignore totals", [&] {
+        auto s = empty_snapshot("live");
+        const auto start = iso_at(parse_time(now_iso()) + 3600);
+        s["games"].push_back({{"id", "g3"}, {"home", "LAL"}, {"away", "GSW"}, {"startsAt", start}});
+        json matchups = json::array({{{"id", 1}, {"type", "matchup"}, {"startTime", start},
+            {"participants", json::array({{{"id", 11}, {"name", "Golden State Warriors"}, {"alignment", "away"}},
+                                           {{"id", 12}, {"name", "Los Angeles Lakers"}, {"alignment", "home"}}})}}});
+        json markets = json::array({
+            {{"matchupId", 1}, {"key", "s;0;m"}, {"prices", json::array({{{"participantId", 11}, {"price", 120}}, {{"participantId", 12}, {"price", -140}}})}},
+            {{"matchupId", 1}, {"key", "s;0;ou"}, {"prices", json::array({{{"participantId", 11}, {"price", -110}, {"points", 224.5}}})}}});
+        parse_pinnacle_markets(matchups, markets, s, now_iso());
+        check(s["quotes"].size() == 2, "Game totals are not team totals and must be skipped");
+        check(s["quotes"][0]["americanOdds"] == 120 && s["quotes"][1]["americanOdds"] == -140, "Exact prices");
+        auto r = evaluate_quote(s["quotes"][1], s);
+        near(number(r["oddsPercent"]), 100 * implied_probability(-140));
+    });
+    test("New keyless price hosts are allowlisted and lookalikes are not", [] {
+        check(allowed_data_url("https://gamma-api.polymarket.com/events?tag_slug=nba"), "Polymarket");
+        check(allowed_data_url("https://external-api.kalshi.com/trade-api/v2/markets"), "Kalshi");
+        check(allowed_data_url("https://guest.api.arcadia.pinnacle.com/0.1/sports"), "Pinnacle");
+        check(!allowed_data_url("https://gamma-api.polymarket.com.evil.test/events"), "Lookalike host");
+        check(!allowed_data_url("https://kalshi.com/trade-api/v2/markets"), "Wrong Kalshi host");
+    });
     std::cout << "\n" << passed << " passed, " << failed << " failed\n";
     return failed ? 1 : 0;
 }
