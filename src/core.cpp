@@ -813,7 +813,11 @@ json evaluate_quote(const json &q, const json &s) {
     r["matchup"] = g.value("away", "") + " @ " + g.value("home", "");
     const bool live = status == "live";
     const auto age = epoch_now() - parse_time(q.value("observedAt", ""));
-    const auto price_limit = live ? 90 : 900;
+    // API-Basketball documents a once-daily pregame odds refresh. Give that
+    // feed one daily snapshot window (never for in-play prices); other pregame
+    // quotes retain the 15-minute limit and all live prices retain 90 seconds.
+    const bool daily_pregame_snapshot = !live && q.value("source", "") == "api_basketball";
+    const auto price_limit = live ? 90 : daily_pregame_snapshot ? 24 * 60 * 60 : 900;
     const bool fresh = age >= -30 && age <= price_limit;
     r["priceAgeSeconds"] = age;
     r["freshness"] = fresh ? "fresh" : age < -30 ? "future" : "stale";
@@ -1524,7 +1528,9 @@ json expire_dashboard(json dashboard) {
         const bool live = row.value("game", json::object()).value("status", "") == "live";
         const auto age = epoch_now() - parse_time(row.value("observedAt", ""));
         row["priceAgeSeconds"] = age;
-        const bool fresh = age >= -30 && age <= (live ? 90 : 900);
+        const bool daily_pregame_snapshot = !live && row.value("source", "") == "api_basketball";
+        const auto price_limit = live ? 90 : daily_pregame_snapshot ? 24 * 60 * 60 : 900;
+        const bool fresh = age >= -30 && age <= price_limit;
         row["freshness"] = fresh ? "fresh" : age < -30 ? "future" : "stale";
         if (!fresh) {
             row["ev"] = nullptr;

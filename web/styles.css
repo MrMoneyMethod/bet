@@ -266,3 +266,7 @@ main{flex:1;min-width:0;padding:20px 30px 0;max-width:1900px;margin:0 auto}.mode
 .history-download{margin:10px 0;padding:9px 11px;border:1px solid #26322c;border-radius:10px;background:#101613;color:#c8d3c4;font-size:12px;line-height:1.55}
 .history-download.failed{border-color:#5a3230;color:#e8c4c0}
 #history-download[disabled]{opacity:.55;pointer-events:none}
+
+.source-body p a{color:#4979c7;text-decoration:underline;text-underline-offset:2px;font-weight:600}
+.official-context a{color:#9ec4ff;text-decoration:underline;text-underline-offset:2px;font-weight:600}
+[data-theme="dark"] .source-body p a{color:#9ec4ff}
