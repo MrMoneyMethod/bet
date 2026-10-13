@@ -61,7 +61,8 @@ with tempfile.TemporaryDirectory(prefix='edgecourt-api-') as directory:
         state = json.loads(body)
         token = state['authToken']
         assert len(token) == 64 and state['mode'] == 'demo'
-        assert len(state['featureCatalog']) == 38
+        assert len(state['featureCatalog']) == 53
+        assert state['leagueContext'] == {} and state['transactions'] == [], 'Demo mode carries no live league-desk data'
         assert state['historicalData']['state'] == 'not_installed'
         assert state['historicalData']['games'] == 0
         assert all(m.get('oddsPercent') is not None for m in state['markets'] if m.get('americanOdds') is not None)

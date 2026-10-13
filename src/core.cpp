@@ -344,6 +344,8 @@ json empty_snapshot(const std::string &mode) {
             {"teams", json::object()},
             {"quotes", json::array()},
             {"lineups", json::array()},
+            {"transactions", json::array()},
+            {"leagueContext", json::object()},
             {"sources", json::array()},
             {"refreshing", false},
             {"revision", 0}};
@@ -442,6 +444,62 @@ json feature_catalog() {
                          {"label", "Season per-game averages & DD/TD counts"},
                          {"role", "context"},
                          {"source", "NBA player stats via nba_api LeagueDashPlayerStats"}},
+                        {{"group", "Player history"},
+                         {"label", "Player index bio, roster status & draft profile"},
+                         {"role", "context"},
+                         {"source", "NBA player index via nba_api PlayerIndex"}},
+                        {{"group", "Player history"},
+                         {"label", "Clutch totals (last 5 min, within 5) & fantasy points"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api LeagueDashPlayerClutch"}},
+                        {{"group", "Player history"},
+                         {"label", "Hustle totals: deflections, screen assists, box-outs"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api LeagueHustleStatsPlayer"}},
+                        {{"group", "Player history"},
+                         {"label", "Estimated ratings, usage & league ranks"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api PlayerEstimatedMetrics"}},
+                        {{"group", "Player history"},
+                         {"label", "Tracking shooting profile (frequency, eFG%, 2PT/3PT)"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api LeagueDashPlayerPtShot"}},
+                        {{"group", "Player history"},
+                         {"label", "Tracking defended FG% differential"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api LeagueDashPtDefend"}},
+                        {{"group", "Player history"},
+                         {"label", "Latest official transaction (signing / waiver / trade)"},
+                         {"role", "context"},
+                         {"source", "NBA_Player_Movement static archive (NBA transactions page)"}},
+                        {{"group", "Team environment"},
+                         {"label", "Estimated team ratings, pace & league ranks"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api TeamEstimatedMetrics"}},
+                        {{"group", "Team environment"},
+                         {"label", "Team clutch totals & record"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api LeagueDashTeamClutch"}},
+                        {{"group", "Team environment"},
+                         {"label", "Team hustle totals"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api LeagueHustleStatsTeam"}},
+                        {{"group", "Team environment"},
+                         {"label", "Team tracking defended FG% differential"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api LeagueDashPtTeamDefend"}},
+                        {{"group", "Team environment"},
+                         {"label", "Opponent tracking shot profile"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api LeagueDashOppPtShot"}},
+                        {{"group", "Team environment"},
+                         {"label", "Most-used five-man lineup"},
+                         {"role", "context"},
+                         {"source", "NBA stats via nba_api LeagueDashLineups"}},
+                        {{"group", "Team environment"},
+                         {"label", "Full-season schedule, arena & broadcasters"},
+                         {"role", "context"},
+                         {"source", "NBA.com scheduleLeagueV2 (NBA CDN)"}},
                         {{"group", "Availability"},
                          {"label", "Player injury / out status"},
                          {"role", "guard"},
@@ -449,7 +507,11 @@ json feature_catalog() {
                         {{"group", "Availability"},
                          {"label", "Confirmed starter status"},
                          {"role", "guard"},
-                         {"source", "Required for first basket"}},
+                         {"source", "NBA daily lineups / explicit import; required for first basket"}},
+                        {{"group", "Availability"},
+                         {"label", "NBA daily lineup status (confirmed starters only)"},
+                         {"role", "guard"},
+                         {"source", "NBA 00_daily_lineups; expected lineups never confirm"}},
                         {{"group", "Availability"},
                          {"label", "Historical first-FG winners"},
                          {"role", "used"},
@@ -900,6 +962,21 @@ json evaluate_quote(const json &q, const json &s) {
             if (t.contains("fourFactors"))
                 feature(r, std::string(side_team.second) + " effective FG %",
                         100 * number(t["fourFactors"].value("efgPct", json(0))), "%", "context");
+            if (t.contains("estimatedMetrics"))
+                feature(r, std::string(side_team.second) + " estimated net rating",
+                        number(t["estimatedMetrics"].value("eNetRating", json(0))), "pts/100", "context");
+            if (t.contains("clutch"))
+                feature(r, std::string(side_team.second) + " clutch win %",
+                        100 * number(t["clutch"].value("winPct", json(0))), "%", "context");
+            if (t.contains("hustle"))
+                feature(r, std::string(side_team.second) + " season deflections",
+                        number(t["hustle"].value("deflections", json(0))), "total", "context");
+            if (t.contains("trackingDefense"))
+                feature(r, std::string(side_team.second) + " defended FG differential",
+                        100 * number(t["trackingDefense"].value("pctPlusMinus", json(0))), "pp", "context");
+            if (t.contains("topLineup"))
+                feature(r, std::string(side_team.second) + " top lineup minutes",
+                        number(t["topLineup"].value("min", json(0))), "minutes", "context");
         }
     } else {
         const auto key = normalize_name(q.value("player", ""));
@@ -908,6 +985,12 @@ json evaluate_quote(const json &q, const json &s) {
         const auto &pl = s["players"][key];
         r["player"] = pl.value("name", q.value("player", ""));
         r["injury"] = pl.value("injury", "Unknown");
+        if (pl.contains("playerIndex"))
+            r["playerProfile"] = pl["playerIndex"];
+        if (pl.contains("latestTransaction"))
+            r["latestTransaction"] = pl["latestTransaction"];
+        if (pl.contains("lineup") && pl["lineup"].value("gameId", "") == g.value("id", ""))
+            r["lineupContext"] = pl["lineup"];
         if (pl.contains("historySource")) {
             r["historySource"] = pl["historySource"];
             r["caveats"].push_back(
@@ -1185,6 +1268,38 @@ json evaluate_quote(const json &q, const json &s) {
                                 number(season_stats.value("ast", json(0))),
                             "per game", "context");
             }
+            // Official/league context (PlayerIndex, clutch, hustle, estimated
+            // metrics, tracking). Displayed only; the projection above is
+            // built from dated game logs and team pace/ratings.
+            if (pl.contains("playerIndex")) {
+                const auto &index = pl["playerIndex"];
+                if (!index.value("heightInches", json()).is_null())
+                    feature(r, "Height", number(index["heightInches"]), "in", "context");
+                if (number(index.value("weight", json(0))) > 0)
+                    feature(r, "Weight", number(index["weight"]), "lb", "context");
+            }
+            if (pl.contains("clutch")) {
+                feature(r, "Clutch points", number(pl["clutch"].value("pts", json(0))), "total", "context");
+                feature(r, "Clutch FG %", 100 * number(pl["clutch"].value("fgPct", json(0))), "%", "context");
+            }
+            if (pl.contains("hustle")) {
+                feature(r, "Season deflections", number(pl["hustle"].value("deflections", json(0))), "total",
+                        "context");
+                feature(r, "Season screen assists", number(pl["hustle"].value("screenAssists", json(0))), "total",
+                        "context");
+            }
+            if (pl.contains("estimatedMetrics")) {
+                feature(r, "Estimated net rating",
+                        number(pl["estimatedMetrics"].value("eNetRating", json(0))), "pts/100", "context");
+                feature(r, "Estimated usage %",
+                        100 * number(pl["estimatedMetrics"].value("eUsgPct", json(0))), "%", "context");
+            }
+            if (pl.contains("trackingShooting"))
+                feature(r, "Tracking eFG %", 100 * number(pl["trackingShooting"].value("efgPct", json(0))), "%",
+                        "context");
+            if (pl.contains("trackingDefense"))
+                feature(r, "Defended FG differential",
+                        100 * number(pl["trackingDefense"].value("pctPlusMinus", json(0))), "pp", "context");
             int hits = 0, count = 0;
             for (const auto &log : logs) {
                 if (count == 10)
@@ -1368,13 +1483,22 @@ json build_dashboard(const json &snapshot) {
     result["players"] = json::array();
     for (const auto &item : snapshot["players"].items())
         result["players"].push_back(
-            {{"name", item.value().value("name", "")}, {"team", item.value().value("team", "")}});
+            {{"name", item.value().value("name", "")},
+             {"team", item.value().value("team", "")},
+             {"profile", item.value().value("playerIndex", json(nullptr))}});
+    // Official league desk: season-schedule metadata, today's lineup coverage
+    // and the retained current-season transactions. Compact by design — the
+    // full schedule/transaction archives stay at their sources.
+    result["leagueContext"] = snapshot.value("leagueContext", json::object());
+    result["transactions"] = snapshot.value("transactions", json::array());
     // Compact team context for schedule cards (standings / Four Factors from
     // the nba_api-derived feeds). Deliberately excludes team game logs.
     result["teams"] = json::array();
     for (const auto &item : snapshot["teams"].items()) {
         const auto &t = item.value();
-        if (!t.contains("standings") && !t.contains("fourFactors") && !t.contains("record"))
+        if (!t.contains("standings") && !t.contains("fourFactors") && !t.contains("record") &&
+            !t.contains("estimatedMetrics") && !t.contains("clutch") && !t.contains("hustle") &&
+            !t.contains("trackingDefense") && !t.contains("opponentShotProfile") && !t.contains("topLineup"))
             continue;
         result["teams"].push_back({{"abbr", item.key()},
                                    {"name", t.value("name", item.key())},
@@ -1382,7 +1506,13 @@ json build_dashboard(const json &snapshot) {
                                                   ? t["standings"].value("record", t.value("record", ""))
                                                   : t.value("record", "")},
                                    {"standings", t.value("standings", json(nullptr))},
-                                   {"fourFactors", t.value("fourFactors", json(nullptr))}});
+                                   {"fourFactors", t.value("fourFactors", json(nullptr))},
+                                   {"estimatedMetrics", t.value("estimatedMetrics", json(nullptr))},
+                                   {"clutch", t.value("clutch", json(nullptr))},
+                                   {"hustle", t.value("hustle", json(nullptr))},
+                                   {"trackingDefense", t.value("trackingDefense", json(nullptr))},
+                                   {"opponentShotProfile", t.value("opponentShotProfile", json(nullptr))},
+                                   {"topLineup", t.value("topLineup", json(nullptr))}});
     }
     return result;
 }

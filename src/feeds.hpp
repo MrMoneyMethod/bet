@@ -37,6 +37,30 @@ void parse_team_ratings(const json &document, json &snapshot, const std::string 
 void parse_standings(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_player_season_stats(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_team_four_factors(const json &document, json &snapshot, const std::string &fetched_at);
+// Official/league expansion from the awesome-nba-data Official & League Data
+// section (NBA.com CDN + NBA Stats). Every parser is league-wide and bounded
+// to one request per refresh. Season datasets are context only; the daily
+// lineup parser is the one deliberate exception to "context only" in the
+// sense that an explicitly *confirmed* starter may satisfy the existing
+// first-basket starter guard. Expected/projected lineups never confirm.
+void parse_official_schedule(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_daily_lineups(const json &document, json &snapshot, const std::string &fetched_at,
+                         const std::string &date_token);
+void parse_player_movement(const json &document, json &snapshot, const std::string &fetched_at,
+                           const std::string &season);
+void parse_player_index(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_player_clutch(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_team_clutch(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_player_hustle(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_team_hustle(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_player_estimated_metrics(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_team_estimated_metrics(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_player_tracking_shots(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_player_tracking_defense(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_team_tracking_defense(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_team_opponent_shots(const json &document, json &snapshot, const std::string &fetched_at);
+void parse_team_top_lineups(const json &document, json &snapshot, const std::string &fetched_at);
+std::string daily_lineup_date_token(long long epoch_seconds);
 void parse_polymarket_events(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_kalshi_markets(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_pinnacle_markets(const json &matchups, const json &markets, json &snapshot,
