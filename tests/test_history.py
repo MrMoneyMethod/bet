@@ -111,6 +111,60 @@ class HoopRIngestTests(unittest.TestCase):
             self.assertEqual([entry["win"] for entry in players["Player 200"]["firstBasketHistory"]], [False, True])
             self.assertEqual([entry["win"] for entry in players["Player 100"]["firstBasketHistory"]], [True, False])
 
+    def test_published_hoopr_schema_and_minutes(self):
+        for role, with_pbp in (("home_away", False), ("team_home_away", False), ("unused", True)):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                box, pbp = hoopr_rows("401000001", "2024-01-05", "LAL", "GSW")
+                header = [col for col in HOOPR_BOX_HEADER
+                          if col not in ("home_team_abbreviation", "away_team_abbreviation")]
+                rows = []
+                for values in box:
+                    row = dict(zip(HOOPR_BOX_HEADER, values))
+                    row["minutes"] = "30:30" if row["starter"] == "TRUE" else "10:15"
+                    rows.append([row[col] for col in header] + ["home" if row["team_abbreviation"] == "LAL" else "away"])
+                box_path = self.write_csv(directory, "box.csv", header + [role], rows)
+                arguments = ["hoopr", "--permission-confirmed", "--season", "2024",
+                             "--player-box-csv", str(box_path), "--output", str(Path(directory) / "h"),
+                             "--as-of", "2024-02-01"]
+                if with_pbp:
+                    pbp_path = self.write_csv(directory, "pbp.csv",
+                                             HOOPR_PBP_HEADER + ["home_team_abbrev", "away_team_abbrev"],
+                                             [row + ["LAL", "GS"] for row in pbp])
+                    arguments += ["--pbp-csv", str(pbp_path)]
+                output = io.StringIO()
+                with redirect_stdout(output), redirect_stderr(output):
+                    result = history.main(arguments)
+                self.assertEqual(result, 0, output.getvalue())
+                players = {}
+                for line in (Path(directory) / "h" / "features.jsonl").read_text().splitlines():
+                    record = json.loads(line)
+                    if record["recordType"] == "player":
+                        players[record["feature"]["name"]] = record["feature"]
+                self.assertEqual(players["Player 200"]["logs"][0]["minutes"], 30.5)
+                self.assertEqual(players["Player 206"]["logs"][0]["minutes"], 10.25)
+                self.assertTrue(players["Player 200"]["logs"][0]["home"])
+                self.assertFalse(players["Player 100"]["logs"][0]["home"])
+                self.assertEqual(len(players["Player 200"].get("firstBasketHistory", [])), int(with_pbp))
+
+    def test_hoopr_conflicting_home_away_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            box, _ = hoopr_rows("401000001", "2024-01-05", "LAL", "GSW")
+            # Explicit home LAL contradicts the per-team role on the away rows.
+            path = self.write_csv(directory, "bad.csv", HOOPR_BOX_HEADER + ["home_away"],
+                                  [row + ["home"] for row in box])
+            output = io.StringIO()
+            with redirect_stdout(output), redirect_stderr(output):
+                result = history.main(["hoopr", "--permission-confirmed", "--season", "2024",
+                                       "--player-box-csv", str(path), "--output", str(Path(directory) / "h")])
+            self.assertEqual(result, 1)
+            self.assertIn("Conflicting home/away", output.getvalue())
+
+    def test_hoopr_minutes_formats(self):
+        for value, expected in (("30:30", 30.5), ("00:15", .25), ("30.5", 30.5), ("NA", 0),
+                                ("30:99", 0), ("nan", 0), ("inf", 0), ("30:15:20", 0), ("12x", 0)):
+            with self.subTest(value=value):
+                self.assertEqual(history._hoopr_minutes(value), expected)
+
     def test_hoopr_missing_column_fails_loudly(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_csv(directory, "bad.csv", ["game_id", "athlete_id"], [["1", "2"]])

@@ -1,4 +1,28 @@
-# Current verification: exchange activity and provider audit (2026-10-13)
+# Current verification: history and provider hotfix (2026-10-13)
+
+- **5/5 CTest suites passed** after the changes: exchange activity/provider refresh,
+  core/feeds (**93 tests**), historical Python tooling (**22 tests**), native history
+  integration and real-process HTTP API integration. CMake 4.4.4 / GCC 12.2 on Linux.
+- New regressions cover hoopR `home_away` and PBP `_abbrev` headers, both minute
+  formats, BOM/quoted headers, home/away conflicts, retained five-starter guards,
+  useful all-rejected diagnostics and preservation of the previous bundle.
+- Schedule null regressions, Pinnacle HTTP 204 caching/source state and real-error
+  preservation, complete lineup parameters and six-hour restart-persistent failure
+  backoff passed. No live provider requests or production-corpus import were validated.
+- Windows x64 executable rebuilt with **Zig 0.13.0**; PE32+/AMD64 headers, system DLL
+  imports and embedded hotfix/activity strings inspected. The compiler emitted
+  non-fatal warnings from Zig's bundled libunwind; compilation/linking succeeded.
+  The release ZIP and SHA-256 manifests were regenerated and checked.
+- **Not run:** this hotfix on Windows, fresh GitHub Windows CI, or a new browser
+  suite (no frontend source changes). Prior-revision evidence below is not a claim
+  that these checks were repeated for this hotfix.
+
+See [HISTORICAL_DATA.md](HISTORICAL_DATA.md) for cached-history recovery steps and
+[API_AUDIT.md](API_AUDIT.md) for provider-specific behavior and verification limits.
+
+---
+
+## Previous verification: exchange activity and provider audit (2026-10-13)
 
 This section supersedes provider integration claims in the historical notes below.
 Sportsbook API2 and SportScore have been removed. Current code passed all **5 CTest suites**, both browser suites, JavaScript syntax and diff whitespace checks. The native probe could not receive HTTP responses from provider hosts due to sandbox egress restrictions. No current upstream functionality or rate-limit ceiling is claimed verified. Windows binaries were subsequently rebuilt with Zig 0.13.0, packaged with updated instructions, and inspected for x64 PE format, Windows-system DLL imports, embedded activity UI, ZIP integrity and matching SHA-256 manifests. No Windows runtime test was performed in this Linux sandbox.

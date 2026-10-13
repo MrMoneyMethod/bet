@@ -246,6 +246,88 @@ int main() {
         }
         check(malformed == 2 && retry["retrySeconds"] == 120,
               "Exponential URL backoff survives attempt journaling");
+        const std::string straight_url = "https://guest.api.arcadia.pinnacle.com/0.1/leagues/487/markets/straight?brandId=0";
+        int empty_calls = 0;
+        PublicFeeds no_markets(dir / "no-markets", [&](const std::string &) {
+            ++empty_calls;
+            return HttpResponse{204, "", ""};
+        });
+        auto no_prices = no_markets.get(straight_url, 45, 0);
+        check(no_prices.status == 204 && no_prices.error.empty() && no_prices.data.is_array() && no_prices.data.empty(),
+              "Pinnacle 204 is an empty successful collection, not a JSON or access error");
+        check(!std::filesystem::exists(dir / "no-markets" / (stable_id(straight_url) + ".retry.json")),
+              "A 204 clears the in-flight failure journal");
+        PublicFeeds empty_restarted(dir / "no-markets", [&](const std::string &) {
+            ++empty_calls;
+            return HttpResponse{200, "[]", ""};
+        });
+        auto empty_cached = empty_restarted.get(straight_url, 45, 0);
+        check(empty_calls == 1 && empty_cached.cached && empty_cached.status == 204 && empty_cached.data.empty(),
+              "Empty market response is cached with its status across restart");
+        check(no_markets.get(poly, 60).data.is_null(), "204 is not accepted for unrelated JSON contracts");
+        for (const int status : {403, 404, 429, 500}) {
+            PublicFeeds access_failure(dir / ("pinnacle-failure-" + std::to_string(status)), [&](const std::string &) {
+                return HttpResponse{status, "", "fixture failure"};
+            });
+            const auto failure = access_failure.get(straight_url, 45, 0);
+            check(failure.data.is_null() && failure.status == status && !failure.error.empty(),
+                  "Actual Pinnacle access/server failures are never disguised as empty coverage");
+        }
+        // Successful old prices must be replaced, not served stale on a real 204.
+        {
+            std::ofstream file(dir / "no-markets" / (stable_id(straight_url) + ".json"));
+            file << json({{"url", straight_url}, {"fetchedAt", iso_at(parse_time(now_iso()) - 61)},
+                          {"body", json::array({{{"key", "old-quote"}}})}});
+        }
+        check(no_markets.get(straight_url, 45, 0).data.empty(), "204 replaces expired quotes without stale fallback");
+        std::string lineup_url;
+        int lineup_calls = 0;
+        PublicFeeds reported(dir / "reported-errors", [&](const std::string &url) {
+            if (url.find("/leaguedashlineups?") != std::string::npos) {
+                ++lineup_calls;
+                lineup_url = url;
+                for (const auto *parameter : {"Month=0", "OpponentTeamID=0", "PaceAdjust=N", "Period=0",
+                                              "PlusMinus=N", "Rank=N", "DateFrom=&", "DateTo=&", "TeamID=&",
+                                              "ShotClockRange=&", "VsConference=&", "VsDivision=&"})
+                    check(url.find(parameter) != std::string::npos, "Lineup request includes NBA endpoint defaults");
+                return HttpResponse{500, "", "Public source returned HTTP 500"};
+            }
+            if (url.find("/sports/4/leagues") != std::string::npos)
+                return HttpResponse{200, "[{\"id\":487,\"name\":\"NBA\"}]", ""};
+            if (url == straight_url)
+                return HttpResponse{204, "", ""};
+            if (url.find("/matchups?brandId=0") != std::string::npos)
+                return HttpResponse{200, "[]", ""};
+            return HttpResponse{200, "{\"resultSets\":[]}", ""};
+        });
+        auto report = reported.refresh(empty_snapshot("live"));
+        check(lineup_calls == 1 && !lineup_url.empty(), "Refresh exercises the lineup endpoint once");
+        bool saw_empty = false;
+        for (const auto &entry : report["sources"])
+            if (entry["id"] == "pinnacle")
+                saw_empty = entry["state"] == "empty" && entry["count"] == 0 &&
+                            entry.value("message", "").find("HTTP 204") != std::string::npos;
+        check(saw_empty && report["quotes"].empty(), "Pinnacle source card labels no-content accurately and creates no prices");
+        const auto lineup_retry = dir / "reported-errors" / (stable_id(lineup_url) + ".retry.json");
+        json lineup_failure;
+        {
+            std::ifstream file(lineup_retry);
+            file >> lineup_failure;
+        }
+        check(lineup_failure["retrySeconds"] == 21600, "Lineup 500 defers retries for six hours");
+        // Simulate five minutes passing without sleeping, then restart the client.
+        lineup_failure["attemptedAt"] = iso_at(parse_time(now_iso()) - 300);
+        {
+            std::ofstream file(lineup_retry);
+            file << lineup_failure;
+        }
+        PublicFeeds lineup_restarted(dir / "reported-errors", [&](const std::string &) {
+            ++lineup_calls;
+            return HttpResponse{200, "{\"resultSets\":[]}", ""};
+        });
+        const auto deferred = lineup_restarted.get(lineup_url, 21600, 172800, 21600);
+        check(lineup_calls == 1 && deferred.cached && deferred.status == 500 && deferred.data.is_null(),
+              "Lineup failure backoff persists across restart without inventing data");
         int budget_calls = 0;
         PublicFeeds budget(dir / "budget", [&](const std::string &) {
             ++budget_calls;

@@ -8,7 +8,7 @@ The optional `scripts/basketball_reference_history.py` collector uses Python 3.1
 
 ## Built-in automatic download (default path)
 
-When the app runs in live (non-demo) mode, it now downloads its own historical archive automatically in the background — no Python step required. The downloader (`src/history_download.cpp`) fetches the last five seasons (current season plus the four before it) from SportsDataverse's public ESPN archives in `sportsdataverse/sportsdataverse-data` GitHub releases: per-season player box scores (`player_box_{season}.csv`) and play-by-play (`play_by_play_{season}.csv`). Files are cached under `history/downloads/` with a `download_manifest.json`; finished seasons are skipped on later runs, the in-progress season re-downloads at most once a day, and `features.jsonl` is rebuilt only when cached inputs change. If the current season's play-by-play file is not published yet (GitHub returns 404), that season is recorded as missing and the other seasons still build. Progress, per-season status and failures appear in the Model lab history card and under `historicalData.download` in `GET /api/state`; the Download/update button (or `POST /api/history/download`) starts it manually. Demo mode never auto-downloads.
+When the app runs in live (non-demo) mode, it now downloads its own historical archive automatically in the background — no Python step required. The downloader (`src/history_download.cpp`) fetches the last five seasons (current season plus the four before it) from SportsDataverse's public ESPN archives in `sportsdataverse/sportsdataverse-data` GitHub releases: per-season player box scores (`player_box_{season}.csv`) and play-by-play (`play_by_play_{season}.csv`). Files are cached under `history/downloads/` with a `download_manifest.json`; finished seasons are skipped on later runs, the in-progress season re-downloads at most once a day, and `features.jsonl` is rebuilt when cached inputs, the converter version, or the daily exclusive cutoff change. If the current season's play-by-play file is not published yet (GitHub returns 404), that season is recorded as missing and the other seasons still build. Progress, per-season status and failures appear in the Model lab history card and under `historicalData.download` in `GET /api/state`; the Download/update button (or `POST /api/history/download`) starts it manually. Demo mode never auto-downloads.
 
 The exporter mirrors the Python exporter exactly: regular-season game logs in a 210-day activity window (most recent 150 per player), per-player/team features, and first-made-field-goal history for verified starters. Auto-downloaded bundles are stamped `sportsdataverse/espn`; the C++ loader accepts these as well as older `basketball_reference`-stamped bundles and tags applied records with the same provenance. The Basketball Reference collector above remains an alternative for users who prefer that source.
 
@@ -133,10 +133,25 @@ python3 scripts/basketball_reference_history.py hoopr --permission-confirmed \
   --output edgecourt-data/history --as-of 2024-06-01
 ```
 
-The importer matches games by CSV game id, requires exactly five starters per team
-and home/away columns, and verifies the first field goal against the archived
-play-by-play. Unknown or renamed hoopR headers fail loudly with the missing-column
-list. Player ids are namespaced `espn-...` so the datasets never collide; the
-app-side name crosswalk is unchanged. (GitHub release assets could not be downloaded
-inside the development sandbox, so the importer is tested against fixtures written
-to the hoopR schema; run it once locally to validate the current season's headers.)
+The native and Python importers match games by CSV game id and require exactly
+five historical starters per team. Home/away identity can come from player-row
+`home_away` (`team_home_away` is also accepted), or explicit
+`home_team_abbreviation` / `away_team_abbreviation`, `_abbr`, or `_abbrev` columns.
+The published PBP schema uses `home_team_abbrev` / `away_team_abbrev`.
+Conflicting team metadata is rejected, not guessed. Decimal and `MM:SS` minutes
+are supported. First-field-goal history still requires supporting play-by-play;
+box scores alone do not establish a first scorer.
+
+If no game passes validation, the native builder reports the number read and
+rejected, rejection reasons, and an example game id. It retains the cached CSVs
+and the previous bundle on this failure. Successful bundles include rejection
+counts/examples for partial coverage. After upgrading from the old column mapping,
+restart and use **Model lab → Download/update**; the converter-version fingerprint
+forces a rebuild of existing downloads. Do not delete your data folder to retry.
+
+Player ids remain namespaced `espn-...`; the app-side name crosswalk is unchanged.
+The column mapping was checked against hoopR's published
+[player schema](https://github.com/sportsdataverse/hoopR/blob/main/man/espn_nba_game_all_player_schema.Rd)
+and [play schema](https://github.com/sportsdataverse/hoopR/blob/main/man/espn_nba_game_all_plays_schema.Rd).
+Tests use synthetic values with those headers, not a downloaded production corpus.
+The user's actual cached CSVs were not available for verification.

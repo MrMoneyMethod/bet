@@ -923,6 +923,84 @@ int main() {
         check(warrior["firstBasketHistory"].size() == 2 && warrior["firstBasketHistory"][0]["win"] == true,
               "Away scorer credited in game 2");
     });
+    test("Native hoopR release schema supports home_away and PBP abbrev without guessing", [] {
+        const auto directory = std::filesystem::temp_directory_path() / "edgecourt-sdv-schema-test";
+        std::filesystem::remove_all(directory);
+        std::filesystem::create_directories(directory / "downloads");
+        struct Cleanup {
+            std::filesystem::path directory;
+            ~Cleanup() { std::filesystem::remove_all(directory); }
+        } cleanup{directory};
+        // Synthetic values, but column names match hoopR's published player and play schemas.
+        auto write_csvs = [&](const std::string &role_column, bool with_pbp, bool conflicting = false,
+                              bool incomplete = false) {
+            std::ofstream box(directory / "downloads" / "player_box_2024.csv", std::ios::binary);
+            box << "\xEF\xBB\xBF" // UTF-8 BOM, common in locally saved CSVs.
+                << "\"game_id\",athlete_id,athlete_display_name,team_abbreviation,starter,did_not_play,minutes,"
+                   "points,field_goals_made,field_goals_attempted,free_throws_attempted,offensive_rebounds,"
+                   "rebounds,assists,turnovers,fouls,game_date," << role_column << ",season_type\r\n";
+            for (int side = 0; side < 2; ++side)
+                for (int i = 1; i <= (incomplete && side == 1 ? 4 : 5); ++i) {
+                    const std::string team = side == 0 ? "LAL" : "GS";
+                    box << "401000001," << side * 100 + i << ",Player " << side * 100 + i << ',' << team
+                        << ",TRUE,FALSE,30:30,12,4,8,2,1,6,5,2,3,2024-01-05,"
+                        << (side == 0 ? "home" : "away") << ",2\r\n";
+                }
+            const auto pbp_path = directory / "downloads" / "play_by_play_2024.csv";
+            std::filesystem::remove(pbp_path);
+            if (with_pbp) {
+                std::ofstream pbp(pbp_path);
+                pbp << "game_id,text,period_number,scoring_play,score_value,away_score,home_score,athlete_id_1,"
+                       "home_team_abbrev,away_team_abbrev\n"
+                    << "401000001,Player 1 makes layup,1,TRUE,2,0,2,1,"
+                    << (conflicting ? "GS,LAL" : "LAL,GS") << '\n';
+            }
+        };
+        for (const auto *role : {"home_away", "team_home_away"}) {
+            write_csvs(role, false);
+            auto metadata = build_history_bundle(directory, {2024}, "2024-02-01");
+            check(metadata["games"] == 1 && metadata["events"] == 0, "Box rows establish home/away without PBP");
+            auto bundle = load_history_bundle(directory);
+            const auto &home = bundle.features["players"][normalize_name("Player 1")];
+            const auto &away = bundle.features["players"][normalize_name("Player 101")];
+            check(home["logs"][0]["home"] == true && away["logs"][0]["home"] == false,
+                  "Actual row role determines home advantage; ESPN GS alias normalized");
+            near(number(home["logs"][0]["minutes"]), 30.5);
+            check(!home.contains("firstBasketHistory") || home["firstBasketHistory"].empty(),
+                  "No first-FG verification without PBP");
+        }
+        write_csvs("unused", true);
+        check(build_history_bundle(directory, {2024}, "2024-02-01")["games"] == 1,
+              "PBP home_team_abbrev / away_team_abbrev provide fallback metadata");
+        auto bundle = load_history_bundle(directory);
+        check(bundle.features["players"][normalize_name("Player 1")]["firstBasketHistory"][0]["win"] == true,
+              "PBP scorer still verified with release schema");
+        const auto bundle_path = directory / "features.jsonl";
+        auto read_bundle = [&] {
+            std::ifstream file(bundle_path, std::ios::binary);
+            return std::string(std::istreambuf_iterator<char>(file), {});
+        };
+        const auto previous = read_bundle();
+        auto expect_rejection = [&](const std::string &reason) {
+            bool rejected = false;
+            try {
+                build_history_bundle(directory, {2024}, "2024-02-01");
+            } catch (const std::invalid_argument &error) {
+                const std::string message = error.what();
+                rejected = message.find(reason) != std::string::npos &&
+                           message.find("1 games read, 1 rejected") != std::string::npos &&
+                           message.find("401000001") != std::string::npos;
+            }
+            check(rejected, "All-rejected error includes counts, reason and example game id");
+            check(read_bundle() == previous, "Rejected import preserves the previous bundle byte-for-byte");
+        };
+        write_csvs("home_away", true, true);
+        expect_rejection("conflicting home/away");
+        write_csvs("unused", false);
+        expect_rejection("missing date or home/away");
+        write_csvs("home_away", false, false, true);
+        expect_rejection("not exactly five");
+    });
     test("Polymarket game moneylines become percentage quotes; futures/spreads ignored", [&] {
         auto s = empty_snapshot("live");
         const auto start = iso_at(parse_time(now_iso()) + 86400);
@@ -1299,6 +1377,52 @@ int main() {
         auto empty = empty_snapshot("live");
         parse_official_schedule(doc, empty, now_iso());
         check(empty["games"].empty(), "Official schedule never creates slate games");
+        auto nullable = doc;
+        nullable["leagueSchedule"]["seasonYear"] = nullptr;
+        nullable["leagueSchedule"]["leagueId"] = nullptr;
+        nullable["leagueSchedule"]["weeks"] = nullptr;
+        auto &nullable_game = nullable["leagueSchedule"]["gameDates"][0]["games"][0];
+        for (const auto *field : {"gameCode", "gameStatusText", "arenaName", "arenaCity", "arenaState",
+                                  "postponedStatus", "seriesText", "gameLabel", "gameSubLabel"})
+            nullable_game[field] = nullptr;
+        nullable_game["isNeutral"] = nullptr;
+        nullable_game["broadcasters"] = {
+            {"nationalBroadcasters", json::array({nullptr, {{"broadcasterDisplay", nullptr}},
+                                                   {{"broadcasterDisplay", "ESPN"}}})},
+            {"homeTvBroadcasters", nullptr}};
+        nullable_game["pointsLeaders"] = json::array({
+            nullptr,
+            {{"firstName", nullptr}, {"lastName", "Curry"}, {"teamTricode", nullptr}, {"points", nullptr}}});
+        nullable["leagueSchedule"]["gameDates"][0]["games"].push_back(
+            {{"gameId", nullptr}, {"gameDateTimeUTC", nullptr}, {"homeTeam", nullptr}, {"awayTeam", nullptr}});
+        auto tolerant = demo;
+        parse_official_schedule(nullable, tolerant, now_iso());
+        check(tolerant["leagueContext"]["schedule"]["matchedGames"] == 1,
+              "Explicit null optional fields do not discard a valid scheduled game");
+        check(tolerant["leagueContext"]["schedule"]["seasonYear"] == "" &&
+                  tolerant["leagueContext"]["schedule"]["leagueId"] == "" &&
+                  tolerant["leagueContext"]["schedule"]["weeks"] == 0,
+              "Nullable schedule summary fields fall back safely");
+        check(tolerant["games"][1]["gameCode"] == "" && tolerant["games"][1]["arenaName"] == "" &&
+                  tolerant["games"][1]["broadcasts"]["national"].size() == 1 &&
+                  tolerant["games"][1]["broadcasts"]["national"][0] == "ESPN" &&
+                  tolerant["games"][1]["pointsLeaders"][0]["name"] == "Curry",
+              "Nullable broadcaster/player fields are skipped while valid sibling context is retained");
+        // Whole optional collections and malformed neighbour rows are nullable too.
+        auto &collections = nullable["leagueSchedule"]["gameDates"][0]["games"][0];
+        collections["broadcasters"] = nullptr;
+        collections["pointsLeaders"] = nullptr;
+        nullable["leagueSchedule"]["gameDates"].push_back(nullptr);
+        nullable["leagueSchedule"]["gameDates"].push_back({{"games", nullptr}});
+        parse_official_schedule(nullable, tolerant, now_iso());
+        check(tolerant["leagueContext"]["schedule"]["matchedGames"] == 1 &&
+                  tolerant["games"][1]["broadcasts"]["national"].empty() &&
+                  tolerant["games"][1]["pointsLeaders"].empty(),
+              "Null optional collections and malformed neighbours cannot abort valid schedule rows");
+        nullable["leagueSchedule"]["gameDates"] = nullptr;
+        parse_official_schedule(nullable, tolerant, now_iso());
+        check(tolerant["leagueContext"]["schedule"]["matchedGames"] == 0,
+              "Null date collection is safe and matches nothing");
     });
     test("NBA daily lineups confirm only explicit starters for the first-basket guard", [&] {
         check(daily_lineup_date_token(parse_time("2026-10-13T02:00:00Z")) == "20261012",
