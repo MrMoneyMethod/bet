@@ -791,7 +791,9 @@ json scrape_saved_html(const std::string &html, const std::string &player, const
         if (attributes.find("application/json") != std::string::npos) {
             try {
                 auto doc = json::parse(body);
-                if (doc.is_object() && (doc.contains("quotes") || doc.contains("players")))
+                if (doc.is_object() &&
+                    (doc.contains("quotes") || doc.contains("players") || doc.contains("teams") ||
+                     doc.contains("games") || doc.contains("lineups")))
                     return validate_import(doc);
                 walk_espn(doc, scraped);
             } catch (const json::exception &) {

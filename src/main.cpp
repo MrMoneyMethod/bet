@@ -43,6 +43,8 @@ void help() {
               << "  --host 127.0.0.1                     Loopback only (default)\n"
               << "  --no-browser                         Do not launch a browser\n"
               << "  --data-dir PATH                      Override local storage\n"
+              << "  --offline                            Disable public requests; use local inputs\n"
+              << "  --history-dir PATH                   Local historical feature bundle directory\n"
               << "  --backtest PATH                      Score historical prediction JSON\n"
               << "  --version / --help                   Print version / usage\n\n"
               << "Research only. The model is experimental and uncalibrated. No guaranteed profits.\n";
@@ -50,9 +52,10 @@ void help() {
 } // namespace
 int main(int argc, char **argv) {
     try {
-        bool browser = true;
+        bool browser = true, fetch_public = true;
         int port = 8741;
         std::string host = "127.0.0.1", mode, backtest;
+        std::filesystem::path history_dir;
         auto dir = edgecourt::default_data_dir();
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
@@ -69,12 +72,16 @@ int main(int argc, char **argv) {
                 return 0;
             } else if (arg == "--no-browser")
                 browser = false;
+            else if (arg == "--offline")
+                fetch_public = false;
             else if (arg == "--demo")
                 mode = "demo";
             else if (arg == "--live")
                 mode = "live";
             else if (arg == "--data-dir")
                 dir = value();
+            else if (arg == "--history-dir")
+                history_dir = value();
             else if (arg == "--backtest")
                 backtest = value();
             else if (arg == "--host")
@@ -101,7 +108,7 @@ int main(int argc, char **argv) {
             throw std::invalid_argument("Host must be 127.0.0.1 (desktop) or 0.0.0.0 (preview)");
         std::signal(SIGINT, signal_handler);
         std::signal(SIGTERM, signal_handler);
-        edgecourt::App app(dir, mode);
+        edgecourt::App app(dir, mode, history_dir, fetch_public);
         int bound = app.bind(host, port);
         if (bound <= 0)
             throw std::runtime_error("Cannot bind a local HTTP port");

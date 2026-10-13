@@ -13,6 +13,7 @@ entries = {
     exe: 'Edgecourt.exe',
     root / 'releases' / 'WINDOWS_README.txt': 'READ_ME_FIRST.txt',
     root / 'LICENSE': 'LICENSE.txt',
+    root / 'scripts' / 'basketball_reference_history.py': 'scripts/basketball_reference_history.py',
     root / 'THIRD_PARTY_NOTICES.md': 'THIRD_PARTY_NOTICES.md',
     root / 'vendor' / 'httplib' / 'LICENSE': 'licenses/cpp-httplib-MIT.txt',
     root / 'vendor' / 'nlohmann' / 'LICENSE.MIT': 'licenses/nlohmann-json-MIT.txt',

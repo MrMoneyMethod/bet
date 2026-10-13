@@ -59,13 +59,21 @@ No guessed probabilities from PPG or scoring rate. Require:
 - Exactly 10 starters confirmed for the target event (`starterGameId`) across both teams, no contradictory reported-out starter.
 - At least 20 historical first-made-field-goal observations for every starter.
 
-Jeffreys-smoothed historical frequency `(wins + 0.5)/(games + 1)` is normalized across the complete field. “No” is the complement. Counts are explicit supplied features; the public NBA/ESPN adapters do **not** produce a complete historical first-basket corpus automatically. Frequency normalization is a matchup-independent approximation and does not account for tip-off possession, opening plays or lineup interactions.
+Jeffreys-smoothed historical frequency `(wins + 0.5)/(games + 1)` is normalized across the complete field. “No” is the complement. Dated starter opportunities can come from the optional local PBP archive; the engine counts only observations strictly before the target date (never the target day or future games). Legacy explicit aggregate counts are also supported, but their cutoff cannot be independently checked. The public NBA/ESPN adapters do **not** produce a complete historical first-basket corpus automatically, and no actual corpus is bundled. Historical box-score starters do not confirm a new event's lineup. Frequency normalization is a matchup-independent approximation and does not account for tip-off possession, opening plays or lineup interactions.
 
 Settlement is **first made field goal** (not first free throw/point). Only import matching prices/rules. Live first-basket markets are disabled once a game starts.
 
+## Historical archive inputs
+
+See [HISTORICAL_DATA.md](HISTORICAL_DATA.md). Raw all-season play-by-play remains outside the runtime feature workspace. Recent complete regular-season box-score vectors enter the existing bootstrap, not a new trained ML model. First-FG events become dated historical-start opportunities, with a separate current `lineups` import. Verified opening/final-score/period checks reject incomplete data rather than impute missing fields. Local archive data is still user-supplied/unverified.
+
+Team fallback possessions are the average of both teams' `FGA − ORB + TOV + 0.44 × FTA`; pace scales to 48 minutes, including overtime adjustment. Offense/defense use points per estimated possession. These are explicit approximations, not official possession counts or coefficients fitted to all history. Fresh complete public ratings/overlapping logs and current roster/live fields take priority. Explicit user feature overrides remain authoritative. Historical environment timestamps stay historical, so a stale archive cannot pass the 48-hour live-data guard just because it was exported today.
+
 ## EV, fair prices and sizing
 
-For American odds `a`:
+Bookmaker prices are displayed/input as **implied percentages** (including margin), not model forecasts. A percentage `o` means `q = o/100`, decimal payout `d = 1/q`, and `EV percent = 100 × (P(win)/q + P(push) − 1)`. Calculation precision is preserved even when the UI rounds display to two decimal places.
+
+Legacy American odds `a` remain accepted at the import/provider boundary:
 
 - If positive: decimal `d = 1 + a/100`.
 - If negative: decimal `d = 1 + 100/abs(a)`.

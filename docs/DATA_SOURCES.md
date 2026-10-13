@@ -14,6 +14,7 @@ No API keys or sportsbook credentials are requested. Keyless public access is no
 | NBA stats | `https://stats.nba.com/stats/leaguegamelog?...PlayerOrTeam=T...` | Paired chronological team results, point/margin variance, windowed Elo, rest dates | 6 hours; at most 48-hour cache fallback |
 | ESPN rosters | `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{id}/roster` | Roster/name/team crosswalk and listed injury context | 1 hour; at most 2-hour cache fallback |
 | ESPN summary | `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={id}` | Live player minutes/accrued stats, starter flags, pick-center explicit moneylines when present | 30 seconds; no stale live fallback |
+| Optional authorized Basketball Reference history | Local SQLite archive and streaming feature export; historical HTTPS collection is separate from the app | All parsed timed PBP events, paired box-score vectors, dated first-FG opportunities and approximate team environment fallback | No corpus bundled or full crawl run here. Source permission required; coverage/gaps explicit. See [historical setup](HISTORICAL_DATA.md). |
 | User CSV/JSON | Local import only | All requested odds markets; explicit schedules/history/feature overrides | Quote times preserved. Validate accuracy yourself. |
 | User saved HTML | Local data extraction | Embedded ESPN/normalized JSON; Basketball Reference-style game-log tables | No browsing, crawling or script execution |
 
@@ -27,7 +28,13 @@ ESPN public moneyline prices are **indicative**, not independently verified exec
 
 No all-books prop prices are manufactured from implied model probabilities, game totals, spreads, league averages or demo rows. Team-total odds are not inferred from the game total. A scheduled game without public prices produces explicit unpriced placeholders and zero +EV claims.
 
-Player-prop odds are supplied by local CSV/JSON/manual quote import. First basket additionally needs confirmed lineups and historical first-FG counts, which are not bundled as an automatic corpus.
+Player-prop odds are supplied by local CSV/JSON/manual quote import. All bookmaker prices are displayed as implied percentages including book margin, separate from Model % and paired no-vig percentages. First basket additionally needs current confirmed lineups; dated first-FG opportunities can come from the installed optional historical archive or explicit supplied history. No actual historical corpus is bundled.
+
+## Historical collection
+
+The optional standard-library Python collector discovers completed NBA games through season/month schedules, pairs box scores with complete PBP pages, caches content-hashed originals, persists every parsed timed event and checkpoints progress in SQLite. It is permission gated, checks robots (including wildcard/anchored rules), waits at least 3.1 seconds between requests and stops on access/rate-limit denial without bypasses. It does not run on each live refresh. The C++ app reads bounded exported features and reports coverage. Current provider responses/full historical coverage were **not** verified here. [Collection, permissions and model use](HISTORICAL_DATA.md).
+
+The native historical/model workspace can be opened with `--live --offline` to disable all live public requests, retaining local history/imports and freshness/settlement guards.
 
 ## Scraping implemented
 
@@ -59,4 +66,4 @@ The reference/source software licenses do not grant NBA, ESPN, Basketball Refere
 
 ## Sandbox limitation
 
-The development environment allows outbound access only to GitHub/npm/PyPI hosts, so NBA/ESPN providers cannot be live-verified here. The default preview is **clearly synthetic**. Public endpoint schemas were translated from inspected GitHub reference definitions and fixture-tested. Test actual feed availability on Windows before assuming any quote/history coverage.
+The development environment allows outbound access only to GitHub/npm/PyPI hosts, so NBA/ESPN providers and a full Basketball Reference crawl cannot be live-verified here. The default preview is **clearly synthetic**. Public endpoint schemas were translated from inspected GitHub reference definitions and fixture-tested. Test actual feed availability on Windows before assuming any quote/history coverage.

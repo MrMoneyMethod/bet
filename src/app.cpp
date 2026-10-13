@@ -43,8 +43,11 @@ std::filesystem::path default_data_dir() {
 #endif
     return std::filesystem::current_path() / "edgecourt-data";
 }
-App::App(std::filesystem::path dir, const std::string &initial_mode)
-    : data_dir_(std::move(dir)), feeds_(data_dir_ / "cache"), token_(session_token()) {
+App::App(std::filesystem::path dir, const std::string &initial_mode, std::filesystem::path history_dir,
+         bool fetch_public)
+    : data_dir_(std::move(dir)),
+      history_dir_(history_dir.empty() ? data_dir_ / "history" : std::move(history_dir)),
+      feeds_(data_dir_ / "cache"), token_(session_token()), feeds_enabled_(fetch_public) {
     std::filesystem::create_directories(data_dir_);
     std::string mode = initial_mode;
     if (mode.empty())
@@ -52,10 +55,19 @@ App::App(std::filesystem::path dir, const std::string &initial_mode)
     if (mode != "live")
         mode = "demo";
     snapshot_ = mode == "demo" ? demo_snapshot() : empty_snapshot("live");
+    base_snapshot_ = snapshot_;
+    try {
+        history_ = load_history_bundle(history_dir_);
+    } catch (const std::exception &error) {
+        history_.status["state"] = "unavailable";
+        history_.status["message"] = std::string("Local history was not loaded: ") + error.what();
+    }
+    apply_history(snapshot_, history_);
     imports_ = {{"quotes", json::array()},
                 {"players", json::object()},
                 {"teams", json::object()},
-                {"games", json::array()}};
+                {"games", json::array()},
+                {"lineups", json::array()}};
     auto stored = load("imports.json");
     if (!stored.empty()) {
         try {
@@ -72,8 +84,8 @@ App::App(std::filesystem::path dir, const std::string &initial_mode)
     }
     if (mode == "live") {
         merge_import(snapshot_, imports_);
-        requested_ = true;
-        snapshot_["refreshing"] = true;
+        requested_ = feeds_enabled_;
+        snapshot_["refreshing"] = requested_;
     }
     rebuild_locked();
     routes();
@@ -118,10 +130,35 @@ void App::save(const std::string &name, const json &value) {
 }
 void App::rebuild_locked() {
     snapshot_["revision"] = ++revision_;
+    snapshot_["historicalData"] = history_.status;
     dashboard_ = build_dashboard(snapshot_);
+    dashboard_["historicalData"] = history_.status;
+    dashboard_["publicFeedsEnabled"] = feeds_enabled_;
+    if (!feeds_enabled_)
+        dashboard_["sources"].push_back(
+            {{"id", "offline"},
+             {"label", "Offline workspace"},
+             {"state", "idle"},
+             {"count", 0},
+             {"updatedAt", ""},
+             {"message", "Public network requests are disabled by --offline. Local history "
+                         "and explicit user imports are used; freshness guards still apply."}});
+    dashboard_["sources"].push_back(
+        {{"id", "basketball-reference-history"},
+         {"label", "Basketball Reference historical play-by-play"},
+         {"state", snapshot_.value("mode", "demo") == "demo"
+                       ? "idle"
+                       : history_.status.value("state", "not_installed")},
+         {"updatedAt", history_.status.value("exportedAt", "")},
+         {"count", history_.status.value("games", 0)},
+         {"message",
+          snapshot_.value("mode", "demo") == "demo"
+              ? "Local history is not applied to synthetic Demo. See the historical coverage panel."
+              : history_.status.value("message", "")}});
     dashboard_["authToken"] = token_;
     if (snapshot_.value("mode", "demo") == "live" &&
-        (!imports_["quotes"].empty() || !imports_["players"].empty() || !imports_["games"].empty()))
+        (!imports_["quotes"].empty() || !imports_["players"].empty() || !imports_["games"].empty() ||
+         !imports_["lineups"].empty()))
         dashboard_["sources"].push_back(
             {{"id", "imports"},
              {"label", "Local user imports"},
@@ -155,6 +192,11 @@ void App::refresh() {
         rebuild_locked();
         return;
     }
+    if (!feeds_enabled_) {
+        snapshot_["generatedAt"] = now_iso();
+        rebuild_locked();
+        return;
+    }
     requested_ = true;
     snapshot_["refreshing"] = true;
     dashboard_["refreshing"] = true;
@@ -170,10 +212,12 @@ void App::change_mode(const std::string &mode) {
     cancel_refresh_ = true;
     ++generation_;
     snapshot_ = mode == "demo" ? demo_snapshot() : empty_snapshot("live");
+    base_snapshot_ = snapshot_;
     if (mode == "live") {
+        apply_history(snapshot_, history_);
         merge_import(snapshot_, imports_);
-        snapshot_["refreshing"] = true;
-        requested_ = true;
+        requested_ = feeds_enabled_;
+        snapshot_["refreshing"] = requested_;
     } else
         requested_ = false;
     rebuild_locked();
@@ -217,6 +261,18 @@ json App::import(const json &request) {
             throw std::invalid_argument("A quote references an unknown game or a team outside its matchup. "
                                         "Include the matching game in JSON or use a displayed game ID.");
     }
+    for (const auto &lineup : incoming["lineups"]) {
+        bool found = false;
+        for (const auto &game : candidate["games"])
+            if (game.value("id", "") == lineup.value("gameId", "") &&
+                (game.value("home", "") == lineup.value("team", "") ||
+                 game.value("away", "") == lineup.value("team", ""))) {
+                found = true;
+                break;
+            }
+        if (!found)
+            throw std::invalid_argument("A lineup references an unknown game or a team outside its matchup");
+    }
     json next_imports = imports_;
     if (snapshot_.value("mode", "demo") == "live") {
         json aggregate = empty_snapshot("live");
@@ -224,8 +280,9 @@ json App::import(const json &request) {
         aggregate["players"] = imports_["players"];
         aggregate["teams"] = imports_["teams"];
         aggregate["games"] = imports_["games"];
+        aggregate["lineups"] = imports_["lineups"];
         merge_import(aggregate, incoming);
-        for (auto key : {"quotes", "players", "teams", "games"})
+        for (auto key : {"quotes", "players", "teams", "games", "lineups"})
             next_imports[key] = aggregate[key];
         if (next_imports.dump().size() > 4 * 1024 * 1024)
             throw std::invalid_argument(
@@ -241,6 +298,7 @@ json App::import(const json &request) {
             {"players", incoming["players"].size()},
             {"teams", incoming["teams"].size()},
             {"games", incoming["games"].size()},
+            {"lineups", incoming["lineups"].size()},
             {"persisted", snapshot_.value("mode", "demo") == "live"},
             {"message", snapshot_.value("mode", "demo") == "demo"
                             ? "Imported into synthetic demo only. Demo imports reset on refresh."
@@ -268,6 +326,8 @@ void App::worker_loop() {
             continue;
         }
         requested_ = false;
+        if (!feeds_enabled_)
+            continue;
         auto generation = generation_;
         auto previous = snapshot_;
         snapshot_["refreshing"] = true;
@@ -294,12 +354,31 @@ void App::worker_loop() {
                                             {"updatedAt", now_iso()},
                                             {"message", error}});
         } else {
+            base_snapshot_ = updated;
+            apply_history(updated, history_);
             merge_import(updated, imports_);
             snapshot_ = std::move(updated);
         }
         snapshot_["refreshing"] = false;
         rebuild_locked();
     }
+}
+json App::reload_history() {
+    // Validate the entire replacement off-lock; a bad file never changes the accepted bundle.
+    auto incoming = load_history_bundle(history_dir_);
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (snapshot_.value("mode", "demo") == "live") {
+        auto candidate = base_snapshot_;
+        candidate["refreshing"] = snapshot_.value("refreshing", false);
+        apply_history(candidate, incoming);
+        merge_import(candidate, imports_);
+        snapshot_ = std::move(candidate);
+    }
+    history_ = std::move(incoming);
+    rebuild_locked();
+    return {{"ok", true},
+            {"message", "Local history reloaded. " + history_.status.value("message", "")},
+            {"historicalData", history_.status}};
 }
 bool App::authorize(const httplib::Request &req, httplib::Response &res) {
     if (req.get_header_value("X-Edgecourt-Token") != token_) {
@@ -385,6 +464,18 @@ void App::routes() {
             reply(res, {{"error", error.what()}}, 400);
         }
     });
+    server_.Post("/api/history/reload", [this](const httplib::Request &req, httplib::Response &res) {
+        if (!authorize(req, res))
+            return;
+        try {
+            reply(res, reload_history());
+        } catch (const std::exception &error) {
+            reply(
+                res,
+                {{"error", std::string("History reload failed; previous bundle retained: ") + error.what()}},
+                400);
+        }
+    });
     server_.Post("/api/clear-imports", [this](const httplib::Request &req, httplib::Response &res) {
         if (!authorize(req, res))
             return;
@@ -393,13 +484,16 @@ void App::routes() {
             json cleared = {{"quotes", json::array()},
                             {"players", json::object()},
                             {"teams", json::object()},
-                            {"games", json::array()}};
+                            {"games", json::array()},
+                            {"lineups", json::array()}};
             save("imports.json", cleared);
             imports_ = cleared;
             cancel_refresh_ = true;
             ++generation_;
             snapshot_ = snapshot_.value("mode", "demo") == "demo" ? demo_snapshot() : empty_snapshot("live");
-            requested_ = snapshot_.value("mode", "") == "live";
+            base_snapshot_ = snapshot_;
+            apply_history(snapshot_, history_);
+            requested_ = snapshot_.value("mode", "") == "live" && feeds_enabled_;
             snapshot_["refreshing"] = requested_;
             rebuild_locked();
             condition_.notify_one();

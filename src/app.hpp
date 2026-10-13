@@ -1,6 +1,7 @@
 #pragma once
 #include "core.hpp"
 #include "feeds.hpp"
+#include "history.hpp"
 #include "httplib/httplib.h"
 #include <atomic>
 #include <condition_variable>
@@ -11,7 +12,8 @@
 namespace edgecourt {
 class App {
   public:
-    App(std::filesystem::path data_dir, const std::string &initial_mode);
+    App(std::filesystem::path data_dir, const std::string &initial_mode,
+        std::filesystem::path history_dir = {}, bool fetch_public = true);
     ~App();
     int bind(const std::string &host, int port);
     void listen();
@@ -24,18 +26,20 @@ class App {
     void refresh();
     void change_mode(const std::string &mode);
     json import(const json &request);
+    json reload_history();
     void save(const std::string &name, const json &value);
     json load(const std::string &name);
     bool authorize(const httplib::Request &req, httplib::Response &res);
-    std::filesystem::path data_dir_;
+    std::filesystem::path data_dir_, history_dir_;
+    HistoryBundle history_;
     PublicFeeds feeds_;
     httplib::Server server_;
     std::mutex mutex_;
     std::condition_variable condition_;
     std::thread worker_;
-    json snapshot_, dashboard_, imports_;
+    json snapshot_, base_snapshot_, dashboard_, imports_;
     std::string token_;
-    bool stopping_ = false, requested_ = false;
+    bool feeds_enabled_ = true, stopping_ = false, requested_ = false;
     unsigned long generation_ = 0;
     int revision_ = 0;
     std::atomic<bool> cancel_refresh_{false};

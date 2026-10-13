@@ -27,6 +27,9 @@ try{
   await page.goto(base,{waitUntil:'networkidle'});await page.locator('#loading-overlay').waitFor({state:'hidden'});
   await page.locator('#refresh-button').click();await waitToast();
   assert.equal(await page.locator('#market-rows tr').count(),8);
+  assert.match(await page.locator('.markets-table thead').innerText(),/Odds %/i);
+  for(const price of await page.locator('.price-value, .game-odds').allTextContents())assert.match(price,/^(?:\d+(?:\.\d+)?%|—)$/);
+  assert.match(await page.locator('.research-selection').innerText(),/\d+\.\d+%/);
   await page.locator('[data-category="moneyline"]').click();assert.equal(await page.locator('#market-rows tr').count(),6);
   await page.locator('[data-category="points"]').click();await page.locator('#search-input').fill('Stephen Curry');assert.equal(await page.locator('#market-rows tr').count(),2);
   await page.locator('#ev-filter').click();assert.ok(await page.locator('#market-rows tr').count()<=2);
@@ -39,11 +42,16 @@ try{
   await page.locator('#remove-game-filter').click();
   await page.locator('[data-time="upcoming"]').click();assert.equal(await page.locator('.game-card').count(),2);await page.locator('[data-time="all"]').click();
   await page.locator('.primary-nav [data-view="lab"]').click();assert.equal(await page.locator('.catalog-item').count(),35);assert.ok((await page.locator('#lab-view').innerText()).includes('not established an edge'));
+  assert.ok(await page.locator('.history-card').isVisible());assert.match(await page.locator('.history-card').innerText(),/full crawl has not been run/);
+  await page.locator('#history-reload').click();await waitToast();
   await page.locator('.primary-nav [data-view="markets"]').click();
   await page.locator('#import-button').click();await page.locator('#import-game').selectOption('demo-2');await page.locator('#import-market').selectOption('points');await page.locator('#import-team').selectOption('GSW');
-  await page.locator('#import-player').fill('Stephen Curry');await page.locator('#import-line').fill('26.5');await page.locator('[name="americanOdds"]').fill('115');await page.locator('[name="book"]').fill('Browser quote');await page.locator('#manual-submit').click();
+  await page.locator('#import-player').fill('Stephen Curry');await page.locator('#import-line').fill('26.5');await page.locator('[name="oddsPercent"]').fill('46.51');await page.locator('[name="book"]').fill('Browser quote');await page.locator('#manual-submit').click();
   await page.locator('#import-dialog').waitFor({state:'hidden'});await page.locator('#search-input').fill('Browser quote');assert.equal(await page.locator('#market-rows tr').count(),1);assert.ok((await page.locator('#research-panel').innerText()).includes('Stephen Curry'));
-  const downloadPromise=page.waitForEvent('download');await page.locator('#export-button').click();const download=await downloadPromise;await fs.mkdir('.cache/browser-results',{recursive:true});await download.saveAs('.cache/browser-results/markets.csv');const csv=await fs.readFile('.cache/browser-results/markets.csv','utf8');assert.match(csv,/Browser quote/);assert.match(csv,/modelEVPercent/);
+  assert.equal(await page.locator('.price-value').innerText(),'46.51%');
+  const percentageQuote=await page.evaluate(async()=>{const d=await (await fetch('/api/state')).json();return d.markets.find(m=>m.book==='Browser quote');});
+  assert.equal(percentageQuote.americanOdds,null);assert.equal(percentageQuote.oddsPercent,46.51);
+  const downloadPromise=page.waitForEvent('download');await page.locator('#export-button').click();const download=await downloadPromise;await fs.mkdir('.cache/browser-results',{recursive:true});await download.saveAs('.cache/browser-results/markets.csv');const csv=await fs.readFile('.cache/browser-results/markets.csv','utf8');assert.match(csv,/Browser quote/);assert.match(csv,/modelEVPercent/);assert.match(csv,/oddsPercent/);assert.match(csv,/modelWinProbabilityPercent/);assert.doesNotMatch(csv,/americanOdds/);
   await page.locator('#import-button').click();await page.locator('[data-import-tab="file"]').click();await page.locator('#file-format').selectOption('json');
   await page.locator('#import-content').fill('{not valid json}');await page.locator('#file-submit').click();await page.locator('#file-error').waitFor({state:'visible'});assert.ok(await page.locator('#import-dialog').isVisible());
   const observedAt=new Date().toISOString().replace(/\.\d{3}Z$/,'Z');
@@ -59,5 +67,5 @@ try{
   await page.setViewportSize({width:1440,height:1000});await page.locator('#settings-button').click();await page.locator('#sizing-input').uncheck();await page.locator('#save-settings').click();await page.locator('#more-filters').click();
   await page.screenshot({path:'.cache/browser-results/desktop.png',fullPage:true});
   assert.deepEqual(errors,[]);
-  console.log('PASS browser: category/search/EV filters, watchlist, game/status filters, model lab, manual/file import, validation errors, safe HTML escaping, CSV export, pagination, settings, mobile category access and responsive layout.');
+  console.log('PASS browser: percentage-only prices/input/CSV export, historical coverage/reload, category/search/EV filters, watchlist, game/status filters, model lab, manual/file import, validation errors, safe HTML escaping, CSV export, pagination, settings, mobile category access and responsive layout.');
 }finally{await browser.close();}
