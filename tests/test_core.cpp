@@ -1,6 +1,10 @@
 #include "core.hpp"
 #include "feeds.hpp"
+#include "history.hpp"
+#include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <set>
@@ -528,6 +532,230 @@ int main() {
                 check(r["kellyFraction"].is_null() && r["conservativeEv"].is_null() &&
                           !r["eligible"].get<bool>(),
                       "No stake for expired model");
+    });
+    test("Percentage quotes preserve exact payouts, pushes and Kelly without American rounding", [&] {
+        auto q = find_quote(demo, "points", "Stephen Curry");
+        q.erase("americanOdds");
+        q["oddsPercent"] = 52.1234567;
+        auto imported = validate_import({{"quotes", json::array({q})}})["quotes"][0];
+        check(imported["americanOdds"].is_null(), "No lossy integer American conversion");
+        near(quote_implied_probability(imported), .521234567);
+        near(quote_decimal_odds(imported), 1 / .521234567);
+        near(expected_value(.55, .05, imported), 100 * (.55 / .521234567 + .05 - 1));
+        auto equivalent = json{{"oddsPercent", 100 * implied_probability(-110)}};
+        near(expected_value(.55, .05, equivalent), expected_value(.55, .05, -110));
+        near(fractional_kelly(.55, .05, equivalent), fractional_kelly(.55, .05, -110));
+        auto result = evaluate_quote(imported, demo);
+        check(result["eligible"].get<bool>(), "Percentage-only quote must evaluate");
+        near(number(result["oddsPercent"]), 52.1234567);
+        for (double invalid : {0., 100., -1., 101.}) {
+            q["oddsPercent"] = invalid;
+            throws([&] { validate_import({{"quotes", json::array({q})}}); });
+        }
+        q["oddsPercent"] = 52.38;
+        q["americanOdds"] = 120;
+        throws([&] { validate_import({{"quotes", json::array({q})}}); });
+    });
+    test("All prices expose percentages even when model inputs are blocked", [&] {
+        auto s = empty_snapshot("live");
+        s["games"] = demo["games"];
+        auto q = find_quote(demo, "points", "Stephen Curry");
+        auto r = evaluate_quote(q, s);
+        check(r["probability"].is_null(), "Missing player data stays missing");
+        near(number(r["oddsPercent"]), 100 * implied_probability(q["americanOdds"]));
+        near(number(r["impliedProbability"]), implied_probability(q["americanOdds"]));
+        q["americanOdds"] = nullptr;
+        check(evaluate_quote(q, s)["oddsPercent"].is_null(), "Unpriced is not zero percent");
+    });
+    test("Percentage CSV import and templates work alongside legacy American CSV", [&] {
+        auto csv = std::string("gameId,market,player,team,side,line,oddsPercent,book,observedAt\n") +
+                   "demo-2,points,Stephen Curry,GSW,over,26.5,52.38,Percent book," + now_iso() + "\n";
+        auto parsed = parse_csv_import(csv);
+        near(number(parsed["quotes"][0]["oddsPercent"]), 52.38);
+        check(parsed["quotes"][0]["americanOdds"].is_null(), "Exact percentage price");
+        check(csv_template(demo).find("oddsPercent") != std::string::npos, "Percentage template");
+        throws([&] { parse_csv_import(csv_template(demo)); });
+    });
+    test("Matched no-vig pairs work with percentage-only quotes", [&] {
+        auto s = demo;
+        auto q = find_quote(s, "points", "Stephen Curry");
+        q.erase("americanOdds");
+        q["book"] = "Percent pair";
+        q["oddsPercent"] = 52.38;
+        auto opposite = q;
+        opposite["side"] = "under";
+        opposite["oddsPercent"] = 51.11;
+        auto quotes = validate_import({{"quotes", json::array({q, opposite})}});
+        merge_import(s, quotes);
+        auto board = build_dashboard(s);
+        int paired = 0;
+        for (const auto &row : board["markets"])
+            if (row.value("book", "") == "Percent pair") {
+                ++paired;
+                check(!row["fairProbability"].is_null(), "Percentage quote pair missing fair probability");
+                if (row["side"] == "over")
+                    near(number(row["fairProbability"]), 52.38 / (52.38 + 51.11));
+            }
+        check(paired == 2, "Both percentage selections are present");
+    });
+    test("Dated first-FG counts exclude same-day and future observations", [&] {
+        const auto today = now_iso().substr(0, 10);
+        const auto yesterday = iso_at(parse_time(now_iso()) - 86400).substr(0, 10);
+        const auto tomorrow = iso_at(parse_time(now_iso()) + 86400).substr(0, 10);
+        auto p = json{
+            {"name", "Dated Fixture"},
+            {"team", "GSW"},
+            {"logs", json::array()},
+            {"firstBasketGames", 999},
+            {"firstBasketWins", 999},
+            {"firstBasketHistory", json::array({{{"gameId", "before"}, {"date", yesterday}, {"win", false}},
+                                                {{"gameId", "target-day"}, {"date", today}, {"win", true}},
+                                                {{"gameId", "after"}, {"date", tomorrow}, {"win", true}}})}};
+        p = validate_import({{"players", json::array({p})}})["players"][normalize_name("Dated Fixture")];
+        auto counts = first_basket_counts(p, today + "T23:00:00Z");
+        check(counts["games"] == 1 && counts["wins"] == 0, "No leakage through aggregate counts");
+        check(!p.contains("firstBasketGames"), "Dated data replaces aggregate totals");
+        p["firstBasketHistory"].push_back(p["firstBasketHistory"][0]);
+        throws([&] { validate_import({{"players", json::array({p})}}); });
+    });
+    test("Lineup-only imports retain history and are scoped to the current game", [&] {
+        auto s = demo;
+        auto key = normalize_name("Stephen Curry");
+        auto logs = s["players"][key]["logs"];
+        auto validated = validate_import({{"lineups", json::array({{{"player", "Stephen Curry"},
+                                                                    {"team", "GSW"},
+                                                                    {"gameId", "demo-2"},
+                                                                    {"confirmed", false}}})}});
+        merge_import(s, validated);
+        check(s["players"][key]["logs"] == logs, "Lineup update must not replace historical features");
+        check(!s["players"][key]["starterConfirmed"].get<bool>(), "Explicit deconfirmation applied");
+        auto q = find_quote(s, "first_basket", "Stephen Curry", "yes");
+        check(evaluate_quote(q, s)["probability"].is_null(), "Incomplete field remains blocked");
+        validated["lineups"][0]["confirmed"] = true;
+        merge_import(s, validated);
+        check(!evaluate_quote(q, s)["probability"].is_null(),
+              "Current starter confirmation restores full field");
+        check(s["lineups"].size() == 1, "Lineup updates deduplicate");
+    });
+    test("Streaming historical bundles validate atomically and never confirm current starters", [&] {
+        const auto directory = std::filesystem::temp_directory_path() /
+                               ("edgecourt-history-unit-" +
+                                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(directory);
+        struct Cleanup {
+            std::filesystem::path directory;
+            ~Cleanup() { std::filesystem::remove_all(directory); }
+        } cleanup{directory};
+        check(load_history_bundle(directory).status["state"] == "not_installed",
+              "Missing bundle is explicit");
+        const auto date = iso_at(parse_time(now_iso()) - 86400).substr(0, 10);
+        auto p = demo["players"][normalize_name("Stephen Curry")];
+        p["dataAsOf"] = date + "T23:59:59Z";
+        p["firstBasketHistory"] =
+            json::array({{{"gameId", "fixture-history"}, {"date", date}, {"win", true}}});
+        json manifest = {{"recordType", "manifest"},
+                         {"source", "basketball_reference"},
+                         {"schemaVersion", 1},
+                         {"metadata",
+                          {{"games", 1},
+                           {"events", 20},
+                           {"missingGames", 0},
+                           {"firstDate", date},
+                           {"lastDate", date},
+                           {"asOf", now_iso().substr(0, 10)},
+                           {"exportedAt", now_iso()}}}};
+        auto write = [&](const std::string &extra = "") {
+            std::ofstream file(directory / "features.jsonl");
+            file << manifest.dump() << "\n"
+                 << json{{"recordType", "player"}, {"feature", p}}.dump() << "\n"
+                 << extra;
+        };
+        write();
+        auto history = load_history_bundle(directory);
+        const auto key = normalize_name("Stephen Curry");
+        check(history.status["players"] == 1, "Streaming player feature count");
+        check(!history.features["players"][key]["starterConfirmed"].get<bool>(),
+              "Past starters are not current starters");
+        check(!history.features["players"][key].contains("live"),
+              "Past boxes cannot create fresh live stats");
+        auto live = empty_snapshot("live");
+        live["players"][key] = {{"name", "Stephen Curry"},  {"team", "LAL"},
+                                {"injury", "Out"},          {"logs", json::array()},
+                                {"starterConfirmed", true}, {"starterGameId", "current-event"}};
+        apply_history(live, history);
+        check(live["players"][key]["team"] == "LAL" && live["players"][key]["injury"] == "Out",
+              "Fresh roster status wins");
+        check(live["players"][key]["starterGameId"] == "current-event", "Preserve explicit current lineup");
+        check(live["players"][key]["logs"].size() == p["logs"].size(),
+              "Historical vectors actually enter snapshot");
+        auto isolated = demo;
+        apply_history(isolated, history);
+        check(isolated["players"] == demo["players"], "Demo never mixes real history into synthetic data");
+        write("{bad-json}\n");
+        throws([&] { load_history_bundle(directory); });
+        manifest["synthetic"] = true;
+        write();
+        throws([&] { load_history_bundle(directory); });
+    });
+    test("Polymarket game moneylines become percentage quotes; futures/spreads ignored", [&] {
+        auto s = empty_snapshot("live");
+        const auto start = iso_at(parse_time(now_iso()) + 86400);
+        s["games"].push_back({{"id", "g1"}, {"home", "LAL"}, {"away", "GSW"}, {"startsAt", start}});
+        json doc = json::array({
+            {{"slug", "nba-future"}, {"markets", json::array({{{"active", true}, {"closed", false},
+                {"outcomes", "[\"Yes\", \"No\"]"}, {"outcomePrices", "[\"0.4\", \"0.6\"]"}}})}},
+            {{"slug", "nba-gsw-lal"}, {"markets", json::array({
+                {{"active", true}, {"closed", false}, {"sportsMarketType", "spreads"},
+                 {"outcomes", "[\"Golden State Warriors\", \"Los Angeles Lakers\"]"},
+                 {"outcomePrices", "[\"0.5\", \"0.5\"]"}, {"endDate", start}},
+                {{"active", true}, {"closed", false}, {"sportsMarketType", "moneyline"},
+                 {"outcomes", "[\"Golden State Warriors\", \"Los Angeles Lakers\"]"},
+                 {"outcomePrices", "[\"0.42\", \"0.58\"]"}, {"endDate", start}}})}}});
+        parse_polymarket_events(doc, s, now_iso());
+        check(s["quotes"].size() == 2, "Only the moneyline pair is imported");
+        check(s["quotes"][0]["book"] == "Polymarket" && s["quotes"][0]["americanOdds"].is_null(), "Native % price");
+        near(number(s["quotes"][0]["oddsPercent"]), 42.0);
+        near(number(s["quotes"][1]["oddsPercent"]), 58.0);
+        check(s["quotes"][1]["side"] == "home", "Outcome mapped to the scheduled home team");
+    });
+    test("Kalshi NBA game markets use ticker teams and dollar midpoints", [&] {
+        auto s = empty_snapshot("live");
+        s["games"].push_back({{"id", "g2"}, {"home", "LAL"}, {"away", "DEN"}, {"startsAt", "2026-10-17T02:00:00Z"}});
+        json doc = {{"markets", json::array({
+            {{"status", "active"}, {"event_ticker", "KXNBAGAME-26OCT16DENLAL"}, {"ticker", "KXNBAGAME-26OCT16DENLAL-LAL"},
+             {"occurrence_datetime", "2026-10-17T05:00:00Z"}, {"yes_bid_dollars", "0.5000"}, {"yes_ask_dollars", "0.5900"}},
+            {{"status", "active"}, {"event_ticker", "KXNBAGAME-26OCT16DENLAL"}, {"ticker", "KXNBAGAME-26OCT16DENLAL-DEN"},
+             {"occurrence_datetime", "2026-10-17T05:00:00Z"}, {"yes_bid_dollars", "0.3900"}, {"yes_ask_dollars", "0.5000"}},
+            {{"status", "closed"}, {"event_ticker", "KXNBAGAME-26OCT16DENLAL"}, {"ticker", "KXNBAGAME-26OCT16DENLAL-LAL"},
+             {"occurrence_datetime", "2026-10-17T05:00:00Z"}, {"yes_bid_dollars", "0.9000"}, {"yes_ask_dollars", "0.9100"}}})}};
+        parse_kalshi_markets(doc, s, now_iso());
+        check(s["quotes"].size() == 2, "Closed markets are skipped");
+        near(number(s["quotes"][0]["oddsPercent"]), 54.5);
+        near(number(s["quotes"][1]["oddsPercent"]), 44.5);
+        check(s["quotes"][0]["side"] == "home" && s["quotes"][1]["side"] == "away", "Kalshi sides");
+    });
+    test("Pinnacle guest moneylines keep exact American prices and ignore totals", [&] {
+        auto s = empty_snapshot("live");
+        const auto start = iso_at(parse_time(now_iso()) + 3600);
+        s["games"].push_back({{"id", "g3"}, {"home", "LAL"}, {"away", "GSW"}, {"startsAt", start}});
+        json matchups = json::array({{{"id", 1}, {"type", "matchup"}, {"startTime", start},
+            {"participants", json::array({{{"id", 11}, {"name", "Golden State Warriors"}, {"alignment", "away"}},
+                                           {{"id", 12}, {"name", "Los Angeles Lakers"}, {"alignment", "home"}}})}}});
+        json markets = json::array({
+            {{"matchupId", 1}, {"key", "s;0;m"}, {"prices", json::array({{{"participantId", 11}, {"price", 120}}, {{"participantId", 12}, {"price", -140}}})}},
+            {{"matchupId", 1}, {"key", "s;0;ou"}, {"prices", json::array({{{"participantId", 11}, {"price", -110}, {"points", 224.5}}})}}});
+        parse_pinnacle_markets(matchups, markets, s, now_iso());
+        check(s["quotes"].size() == 2, "Game totals are not team totals and must be skipped");
+        check(s["quotes"][0]["americanOdds"] == 120 && s["quotes"][1]["americanOdds"] == -140, "Exact prices");
+        auto r = evaluate_quote(s["quotes"][1], s);
+        near(number(r["oddsPercent"]), 100 * implied_probability(-140));
+    });
+    test("New keyless price hosts are allowlisted and lookalikes are not", [] {
+        check(allowed_data_url("https://gamma-api.polymarket.com/events?tag_slug=nba"), "Polymarket");
+        check(allowed_data_url("https://external-api.kalshi.com/trade-api/v2/markets"), "Kalshi");
+        check(allowed_data_url("https://guest.api.arcadia.pinnacle.com/0.1/sports"), "Pinnacle");
+        check(!allowed_data_url("https://gamma-api.polymarket.com.evil.test/events"), "Lookalike host");
+        check(!allowed_data_url("https://kalshi.com/trade-api/v2/markets"), "Wrong Kalshi host");
     });
     std::cout << "\n" << passed << " passed, " << failed << " failed\n";
     return failed ? 1 : 0;

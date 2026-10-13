@@ -62,6 +62,11 @@ with tempfile.TemporaryDirectory(prefix='edgecourt-api-') as directory:
         token = state['authToken']
         assert len(token) == 64 and state['mode'] == 'demo'
         assert len(state['featureCatalog']) == 35
+        assert state['historicalData']['state'] == 'not_installed'
+        assert state['historicalData']['games'] == 0
+        assert all(m.get('oddsPercent') is not None for m in state['markets'] if m.get('americanOdds') is not None)
+        assert request('/api/history/reload', {})[0] == 403
+        assert request('/api/history/reload', {}, token)[0] == 200
         assert state['summary']['quotes'] > 100
         assert all(m.get('demo', False) for m in state['markets'] if m.get('americanOdds') is not None)
         assert request('/api/refresh', {})[0] == 403
@@ -101,6 +106,16 @@ with tempfile.TemporaryDirectory(prefix='edgecourt-api-') as directory:
         _, body, _ = request('/api/state')
         assert json.loads(body)['summary']['quotes'] == state['summary']['quotes'], 'Demo refresh resets temporary imports'
         assert not (Path(directory) / 'imports.json').exists(), 'Demo-only imports should not be saved'
+        percent_quote = dict(quote, book='Percentage smoke', oddsPercent=52.1234567)
+        del percent_quote['americanOdds']
+        assert request('/api/import', {'format':'json','data':json.dumps({'quotes':[percent_quote]})}, token)[0] == 200
+        _, body, _ = request('/api/state')
+        percent_row = next(m for m in json.loads(body)['markets'] if m['book'] == 'Percentage smoke')
+        assert percent_row['americanOdds'] is None and abs(percent_row['oddsPercent']-52.1234567) < 1e-9
+        assert percent_row['ev'] is not None and abs(percent_row['ev']-100*(percent_row['probability']/.521234567+percent_row['pushProbability']-1)) < 1e-7
+        bad_percent = dict(percent_quote, oddsPercent=100)
+        assert request('/api/import', {'format':'json','data':json.dumps({'quotes':[bad_percent]})}, token)[0] == 400
+        assert request('/api/import', {'format':'json','data':json.dumps({'lineups':[{'gameId':'orphan','player':'Stephen Curry','team':'GSW','confirmed':True}]})}, token)[0] == 400
         assert request('/unrecognized-route')[0] == 404
         print('PASS API: native server, embedded assets, CSRF/Origin/Host guards, quote imports, deduplication, atomic validation, CSV/template, synthetic isolation and refresh')
     finally:

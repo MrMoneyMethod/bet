@@ -5,7 +5,7 @@ Edgecourt.exe
   ├─ embedded HTML / CSS / JS  → default browser
   ├─ cpp-httplib local HTTP server
   │   ├─ GET  /api/health, /api/state, /api/template.csv
-  │   └─ POST /api/mode, /api/refresh, /api/import, /api/clear-imports
+  │   └─ POST /api/mode, /api/refresh, /api/import, /api/clear-imports, /api/history/reload
   ├─ C++ eligibility + prediction engine
   ├─ one bounded public-data refresh worker
   ├─ WinHTTP on Windows / exec'd curl on Linux (no shell)
@@ -16,6 +16,8 @@ Edgecourt.exe
 
 - `src/core.*`: mathematics, feature inventory, synthetic fixtures, import validators, EV/no-vig aggregation, request-time eligibility expiry and backtest scoring.
 - `src/feeds.*`: OS HTTPS transport, cache/rate budget, ESPN/NBA parsers, chronological Elo and saved-HTML data extraction.
+- `src/history.*`: bounded JSONL archive-feature loading/validation, current/public priority merge and Demo isolation; raw all-season events are not loaded into the native app.
+- `scripts/basketball_reference_history.py`: optional, authorized standard-library collector with a resumable SQLite archive, raw gzip cache and atomic runtime feature export.
 - `src/app.*`: HTTP routes, session token, persistence, mutex-protected workspace state and refresh worker.
 - `src/main.cpp`: executable CLI, browser launcher, loopback defaults, shutdown handling.
 - `web/*`: responsive browser UI; no CDN fonts, third-party scripts, images or external API calls.
@@ -37,17 +39,20 @@ Cached model computations are not allowed to freeze eligibility. `/api/state` re
 - Windows: `%LOCALAPPDATA%\Edgecourt`.
 - Linux: `$XDG_DATA_HOME/edgecourt`, otherwise `~/.local/share/edgecourt`.
 - `--data-dir` overrides this for tests/development.
+- `history/features.jsonl`: optional runtime feature bundle, with honest archive counts/coverage. `--history-dir` overrides its local directory. Raw `history.sqlite3` and `pages/*.html.gz` are collector artifacts, not served or shipped by the app.
 - `settings.json`: selected mode.
 - `imports.json`: validated real-data workspace imports; quote times preserved.
 - `cache/*.json`: bounded provider response caches keyed by URL hash, with original retrieval times and URLs.
 
-Writes use a temporary file then replacement (`MoveFileExW` on Windows, filesystem rename on Linux). No external database or model download is needed. Watchlist/bankroll/display settings use this browser's localStorage; they are not cloud-synced and are not encrypted.
+Writes use a temporary file then replacement (`MoveFileExW` on Windows, filesystem rename on Linux). No external database or model download is needed to run the native app. Optional historical collection uses Python's built-in SQLite; the executable reads only its streamed feature export. Watchlist/bankroll/display settings use this browser's localStorage; they are not cloud-synced and are not encrypted.
 
 ## Network boundaries
 
 The desktop default binds **127.0.0.1**, not all network interfaces. Each process gets a random write token returned by the same-origin state API. Mutations require the token and a matching Origin when supplied. Host validation rejects unrelated names/DNS-rebinding targets; loopback hosts and Arena `.e2b.app` previews are accepted. CORS is not enabled.
 
 The preview deliberately binds `0.0.0.0` and permits iframe embedding. The **GET state endpoint is not an authenticated multi-user service**. Do not publicly expose real personal imports or treat `--host 0.0.0.0` as a production deployment. Browser backend calls are relative, never browser-facing localhost requests to a separate service.
+
+`--offline` disables public refresh requests without switching real imports/history to synthetic Demo. Historical reload validates a full replacement before swapping it in; old archive features are rebuilt from the last public baseline plus explicit imports, so a removed/replaced bundle cannot leave stale historical vectors behind.
 
 Source requests use fixed HTTPS allowlisted hosts and cannot follow redirects or request arbitrary URLs. Linux curl is spawned with an argument vector, not a shell command. Windows browser launch receives only a generated loopback URL. There are no sportsbook credentials, betting actions, uploads to third-party services or telemetry.
 

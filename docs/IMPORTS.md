@@ -12,14 +12,14 @@ Declared synthetic samples are rejected in Live mode. Real research inputs shoul
 
 ## CSV quotes
 
-Required columns (case-sensitive): `gameId,market,team,side,americanOdds,book,observedAt`. Add `player` for player markets and `line` for O/U. Optional `settlement` must be `full_game_including_ot`.
+Required columns (case-sensitive): `gameId,market,team,side,oddsPercent,book,observedAt`. Legacy `americanOdds` may replace `oddsPercent`. Add `player` for player markets and `line` for O/U. Optional `settlement` must be `full_game_including_ot`.
 
 ```csv
-gameId,market,player,team,side,line,americanOdds,book,observedAt,settlement
-REPLACE_GAME_ID,points,Stephen Curry,GSW,over,26.5,-110,Your book,2026-10-12T23:00:00Z,full_game_including_ot
+gameId,market,player,team,side,line,oddsPercent,book,observedAt,settlement
+REPLACE_GAME_ID,points,Stephen Curry,GSW,over,26.5,52.38,Your book,2026-10-12T23:00:00Z,full_game_including_ot
 ```
 
-**Replace the event ID and observation time** with the displayed real game/current price timestamp. This illustrative row is not a real quote. The app's CSV template generates an actual current-workspace game ID and UTC time but leaves American odds blank, so an untouched template cannot manufacture a price. For moneyline, leave player/line empty and use `home` or `away` with the corresponding team.
+**Replace the event ID and observation time** with the displayed real game/current price timestamp. This illustrative row is not a real quote. The app's CSV template generates an actual current-workspace game ID and UTC time but leaves the odds percentage blank, so an untouched template cannot manufacture a price. For moneyline, leave player/line empty and use `home` or `away` with the corresponding team.
 
 Quoted commas, escaped double quotes, CRLF/LF and multiline quoted fields are supported. A UTF-8 BOM is tolerated. Numbers must be complete numeric values, not currency strings or malformed text. Duplicate headers/column-count mismatches are rejected.
 
@@ -40,7 +40,9 @@ Quoted commas, escaped double quotes, CRLF/LF and multiline quoted fields are su
 
 Full-game including overtime only; no quarters, halves, alternate settlement scopes, void modeling or auto-settlement. DD/TD use all five official countable categories. First basket means **first made field goal**, not first point/free throw. Check player participation/DNP and first-basket rules at the sportsbook; the model does not implement book-specific void/refund policies.
 
-American odds are integers `<= -100` or `>= +100`, bounded to ±100,000. Fractional/decimal odds, zero, `-99` and other ambiguous values are rejected. Prop lines are 0.5–150; team total lines 0.5–300. `observedAt` must be exact **UTC** `YYYY-MM-DDTHH:MM:SSZ`, not local time or a numeric epoch. Future prices more than 30 seconds ahead are rejected. Old prices import as stale and cannot claim current EV.
+`oddsPercent` is a **numeric percentage from 0.01 to 99.99**, including book margin, not the model's win forecast or a no-vig probability. Enter `52.38`, not `0.5238` or the string `"52.38%"`. Arbitrary decimal precision within that range is retained for EV/Kelly calculations. All odds displays and exported quote columns use percentages; exported model/push probability columns also explicitly use percent units.
+
+Legacy American odds are integers `<= -100` or `>= +100`, bounded to ±100,000. Fractional/decimal payout-odds fields, zero, `-99` and other ambiguous values are rejected. Provide one price format. If both `americanOdds` and `oddsPercent` are supplied, they must agree to within 0.0000001 percentage points; do not mix an exact American price with a separately rounded percentage. Imported American prices preserve their exact implied probability/payout internally. Prop lines are 0.5–150; team total lines 0.5–300. `observedAt` must be exact **UTC** `YYYY-MM-DDTHH:MM:SSZ`, not local time or a numeric epoch. Future prices more than 30 seconds ahead are rejected. Old prices import as stale and cannot claim current EV.
 
 Use standard NBA abbreviations (`GSW`, `NYK`, `NOP`, `SAS`, `UTA`, `WAS`, etc.). IDs start with an ASCII letter/digit and contain only letters/digits, dots, colons, dashes and underscores. Prices are deduplicated by event/market/normalized player/team/side/line/book; a newer import for the same identity replaces it, including an explicit public feed quote.
 
@@ -56,7 +58,7 @@ Use standard NBA abbreviations (`GSW`, `NYK`, `NOP`, `SAS`, `UTA`, `WAS`, etc.).
       "team": "GSW",
       "side": "over",
       "line": 26.5,
-      "americanOdds": -110,
+      "oddsPercent": 52.38,
       "book": "Your book",
       "observedAt": "2026-10-12T23:00:00Z",
       "status": "open",
@@ -126,9 +128,38 @@ Optional player fields:
 - `historicalPace`: 70–130, the baseline pace of the supplied sample. Without it, current team pace is an explicit approximation.
 - `dataAsOf`: valid UTC feature timestamp, preserved if provided.
 - `live`: `{ "gameId": "...", "minutes": 21.5, "points": 19, "rebounds": 3, "assists": 5, "threes": 4, "steals": 1, "blocks": 0, "dataAsOf": "...Z" }`. Fresh values and the exact matching game ID are required for in-play props.
-- `starterConfirmed`: boolean. If true, `starterGameId` is required and must match the target event; an old lineup does not confirm a new game. For first basket, every one of the 10 starters also needs `firstBasketGames >= 20` and `firstBasketWins` between 0 and games. Supply same-definition historical first-FG wins, not first points. First-basket-only players may have an empty `logs` array but still need complete first-FG history/lineup fields.
+- `starterConfirmed`: boolean. If true, `starterGameId` is required and must match the target event; an old lineup does not confirm a new game. For first basket, five starters per team need at least 20 historical first-FG opportunities. Use `firstBasketHistory` (below) or legacy `firstBasketGames >= 20` and `firstBasketWins` between 0 and games. Supply same-definition historical first-FG wins, not first points. First-basket-only players may have an empty `logs` array but still need complete first-FG history/lineup fields.
 
 In-play player overtime rotations are not modeled; those forecasts are suppressed. A zero remaining horizon awaits a confirmed next period/final state. Already-achieved full-game thresholds are not offered as new edges.
+
+### Dated first-field-goal observations
+
+The historical collector automatically exports these for players who started a verified paired game:
+
+```json
+"firstBasketHistory": [
+  { "gameId": "historical-source-game-1", "date": "2026-04-01", "win": false },
+  { "gameId": "historical-source-game-2", "date": "2026-04-03", "win": true }
+]
+```
+
+This is a fictional format example, not actual history. Maximum 2,000 unique game IDs; dates must be real and `win` boolean. The engine excludes the target date and all future dates at evaluation time. When present, dated observations replace legacy aggregate counts. Legacy undated counts remain supported, but their cutoff cannot be independently checked.
+
+### Current lineup confirmations without replacing history
+
+Use a separate top-level `lineups` array so current confirmations do not overwrite installed game logs or dated first-FG history:
+
+```json
+{
+  "lineups": [
+    { "gameId": "REPLACE_CURRENT_GAME_ID", "player": "Exact player name", "team": "GSW", "confirmed": true }
+  ]
+}
+```
+
+Supply all ten actual starters (five per team) for the current game. `confirmed: false` explicitly removes a confirmation. Maximum 100 saved confirmations, deduplicated by game/player. The game/team must exist in the workspace or the same import batch. Confirmations apply to available matching player/team records and do not create missing statistical history, override a fresh roster team assignment, or clear an out/inactive status. Old-game confirmations cannot qualify a new matchup.
+
+For full archive collection and streaming feature bundles larger than the 4 MB UI import limit, see [HISTORICAL_DATA.md](HISTORICAL_DATA.md). The app loads them locally; there is no arbitrary browser file-path/URL fetch endpoint. A downloaded/exported historical timestamp is not refreshed to receipt time.
 
 ## Saved HTML
 
@@ -142,6 +173,6 @@ The app reads local data only. No uploaded HTML/JS is executed. It will not foll
 
 ## Limits / persistence
 
-Maximum 4 MB per import and combined saved-import document, 2,000 quote rows, 600 player/team records and 150 logs per record. Oversized/invalid batches fail before state changes. Persisted odds keep their original observation times. Quotes cannot be matched across different books/lines to manufacture a no-vig comparison.
+Maximum 4 MB per import and combined saved-import document, 2,000 quote rows, 600 player/team records, 150 logs per record and 100 game-scoped lineup confirmations. The separately configured historical feature bundle has its own bounded streaming format. Oversized/invalid batches fail before state changes. Persisted odds keep their original observation times. Quotes cannot be matched across different books/lines to manufacture a no-vig comparison.
 
 Clear saved imports from Settings to remove user overrides; public cache is retained. Dataset source/provenance, available inputs, gaps, price age and caveats are shown in the research/model-lab views.

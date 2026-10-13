@@ -3,11 +3,11 @@
   "description": "Fictional supplied predictions for exercising the scoring CLI only. Not a trained-model backtest, not real wagers, and not evidence of profitability.",
   "minEv": 0,
   "observations": [
-    {"probability": 0.60, "pushProbability": 0, "americanOdds": -110, "predictedAt": "2026-09-01T22:00:00Z", "startsAt": "2026-09-02T00:00:00Z", "result": "win"},
-    {"probability": 0.55, "pushProbability": 0, "americanOdds": -110, "predictedAt": "2026-09-03T22:00:00Z", "startsAt": "2026-09-04T00:00:00Z", "result": "loss"},
-    {"probability": 0.40, "pushProbability": 0, "americanOdds": 130, "predictedAt": "2026-09-05T22:00:00Z", "startsAt": "2026-09-06T00:00:00Z", "result": "loss"},
-    {"probability": 0.52, "pushProbability": 0.05, "americanOdds": -105, "predictedAt": "2026-09-07T22:00:00Z", "startsAt": "2026-09-08T00:00:00Z", "result": "push"},
-    {"probability": 0.45, "pushProbability": 0, "americanOdds": 150, "predictedAt": "2026-09-09T22:00:00Z", "startsAt": "2026-09-10T00:00:00Z", "result": "win"},
-    {"probability": 0.58, "pushProbability": 0, "americanOdds": -125, "predictedAt": "2026-09-11T22:00:00Z", "startsAt": "2026-09-12T00:00:00Z", "result": "loss"}
+    {"probability": 0.60, "pushProbability": 0, "oddsPercent": 52.38095238095238, "predictedAt": "2026-09-01T22:00:00Z", "startsAt": "2026-09-02T00:00:00Z", "result": "win"},
+    {"probability": 0.55, "pushProbability": 0, "oddsPercent": 52.38095238095238, "predictedAt": "2026-09-03T22:00:00Z", "startsAt": "2026-09-04T00:00:00Z", "result": "loss"},
+    {"probability": 0.40, "pushProbability": 0, "oddsPercent": 43.47826086956522, "predictedAt": "2026-09-05T22:00:00Z", "startsAt": "2026-09-06T00:00:00Z", "result": "loss"},
+    {"probability": 0.52, "pushProbability": 0.05, "oddsPercent": 51.21951219512195, "predictedAt": "2026-09-07T22:00:00Z", "startsAt": "2026-09-08T00:00:00Z", "result": "push"},
+    {"probability": 0.45, "pushProbability": 0, "oddsPercent": 40, "predictedAt": "2026-09-09T22:00:00Z", "startsAt": "2026-09-10T00:00:00Z", "result": "win"},
+    {"probability": 0.58, "pushProbability": 0, "oddsPercent": 55.55555555555556, "predictedAt": "2026-09-11T22:00:00Z", "startsAt": "2026-09-12T00:00:00Z", "result": "loss"}
   ]
 }

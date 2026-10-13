@@ -1,4 +1,4 @@
-EDGECOURT 0.1.0 - WINDOWS 10/11 x64
+EDGECOURT 0.3.0 - WINDOWS 10/11 x64
 ==================================
 
 1. Extract this ZIP to a folder you control.
@@ -22,6 +22,8 @@ There is NO bundled reliable free/keyless all-books player-prop odds feed.
 Use Import odds to enter a current quote or import CSV/JSON prices/features.
 The CSV template uses a current-workspace game ID, but leaves odds blank.
 Supply real prices; an untouched template cannot manufacture a quote.
+All odds are shown/entered as implied percentages, including book margin,
+separately from Model %. Legacy American odds in files remain supported.
 
 Supported markets: moneyline, points, rebounds, assists, threes, PRA,
 double-double, triple-double, first basket, team totals O/U.
@@ -34,6 +36,23 @@ historical first-FG counts; confirmations must match starterGameId.
 These are not guessed from points per game. Live player overtime rotations
 are not modeled; those forecasts are suppressed. Achieved full-game
 thresholds are not treated as new edges.
+
+HISTORICAL PLAY-BY-PLAY (OPTIONAL)
+---------------------------------
+No full Basketball Reference crawl was run in the sandbox and no dataset
+is bundled. The optional scripts/basketball_reference_history.py collector
+requires Python 3.10+ separately; the executable still runs without Python
+or SQLite installed. Obtain appropriate Sports Reference permission before
+collecting or using its data. The collector is permission gated, obeys robots,
+waits at least 3.1 seconds between requests, resumes from a local SQLite
+archive, and stops on blocks/rate limits without bypasses.
+
+See docs/HISTORICAL_DATA.md. The app loads history/features.jsonl under its
+data directory, or use --history-dir PATH. Model lab shows archive counts,
+gaps, date range and Reload local history. Current quotes/schedule and all
+ten actual current starters are still needed. Historical starters never
+confirm a new matchup. Dated first-FG history excludes the target day/future
+observations. Raw all-season events stay outside the executable/Git.
 
 IMPORTANT LIMITATIONS
 ---------------------
@@ -68,6 +87,8 @@ Edgecourt.exe --live
 Edgecourt.exe --port 8741 --no-browser
 Edgecourt.exe --data-dir "C:\YourFolder\EdgecourtData"
 Edgecourt.exe --backtest samples\backtest-example.json
+Edgecourt.exe --live --history-dir "C:\YourFolder\history"
+Edgecourt.exe --live --offline --data-dir "C:\YourFolder\EdgecourtData"
 
 The bundled backtest example is FICTIONAL, not real model performance.
 See docs\IMPORTS.md, docs\MODEL.md and docs\DATA_SOURCES.md for details.

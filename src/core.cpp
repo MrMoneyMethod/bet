@@ -87,6 +87,40 @@ void require_number(const json &obj, const char *key, double lo, double hi) {
         obj[key].get<double>() < lo || obj[key].get<double>() > hi)
         throw std::invalid_argument(std::string("Out-of-range numeric field: ") + key);
 }
+void normalize_price(json &q) {
+    const bool percent = q.contains("oddsPercent") && !q["oddsPercent"].is_null();
+    const bool american = q.contains("americanOdds") && !q["americanOdds"].is_null();
+    if (!percent && !american)
+        throw std::invalid_argument("Provide oddsPercent (0.01..99.99) or legacy americanOdds");
+    if (percent) {
+        require_number(q, "oddsPercent", 0.01, 99.99);
+        if (number(q["oddsPercent"]) <= 0 || number(q["oddsPercent"]) >= 100)
+            throw std::invalid_argument("oddsPercent must be strictly between 0 and 100");
+    }
+    if (american) {
+        require_number(q, "americanOdds", -100000, 100000);
+        if (!q["americanOdds"].is_number_integer())
+            throw std::invalid_argument("americanOdds must be an integer");
+        const double percent_value = 100 * implied_probability(q["americanOdds"]);
+        if (percent && std::abs(number(q["oddsPercent"]) - percent_value) > 1e-7)
+            throw std::invalid_argument(
+                "oddsPercent and americanOdds disagree; provide just one price format");
+        q["oddsPercent"] = percent_value;
+    } else {
+        q["americanOdds"] = nullptr;
+    }
+}
+double ev_at_decimal(double win, double push, double decimal) {
+    if (!std::isfinite(win) || !std::isfinite(push) || win < 0 || push < 0 || win + push > 1.0 + 1e-8)
+        throw std::invalid_argument("Invalid outcome probabilities");
+    return 100.0 * (win * decimal + push - 1.0);
+}
+double kelly_at_decimal(double win, double push, double decimal, double fraction) {
+    const double b = decimal - 1, loss = std::max(0.0, 1.0 - win - push);
+    if (win + loss < 1e-9)
+        return 0;
+    return clamp(fraction * (b * win - loss) / (b * (win + loss)), 0.0, 0.02);
+}
 std::vector<std::vector<std::string>> csv_rows(const std::string &input) {
     std::vector<std::vector<std::string>> rows;
     std::vector<std::string> row;
@@ -236,16 +270,51 @@ double decimal_odds(int american) {
 double implied_probability(int american) {
     return 1.0 / decimal_odds(american);
 }
+bool has_quote_price(const json &q) {
+    return (q.contains("oddsPercent") && q["oddsPercent"].is_number() && number(q["oddsPercent"]) > 0 &&
+            number(q["oddsPercent"]) < 100) ||
+           (q.contains("americanOdds") && q["americanOdds"].is_number_integer() &&
+            (number(q["americanOdds"]) <= -100 || number(q["americanOdds"]) >= 100));
+}
+double quote_implied_probability(const json &q) {
+    if (q.contains("oddsPercent") && !q["oddsPercent"].is_null()) {
+        const double p = number(q["oddsPercent"], -1) / 100;
+        if (p > 0 && p < 1)
+            return p;
+        throw std::invalid_argument("oddsPercent must be strictly between 0 and 100");
+    }
+    if (q.contains("americanOdds") && q["americanOdds"].is_number_integer())
+        return implied_probability(q["americanOdds"]);
+    throw std::invalid_argument("Quote has no price");
+}
+double quote_decimal_odds(const json &q) {
+    return 1 / quote_implied_probability(q);
+}
 double expected_value(double win, double push, int american) {
-    if (win < 0 || push < 0 || win + push > 1.0 + 1e-8)
-        throw std::invalid_argument("Invalid outcome probabilities");
-    return 100.0 * (win * decimal_odds(american) + push - 1.0);
+    return ev_at_decimal(win, push, decimal_odds(american));
+}
+double expected_value(double win, double push, const json &quote) {
+    return ev_at_decimal(win, push, quote_decimal_odds(quote));
 }
 double fractional_kelly(double win, double push, int american, double fraction) {
-    const double b = decimal_odds(american) - 1, loss = std::max(0.0, 1.0 - win - push);
-    if (win + loss < 1e-9)
-        return 0;
-    return clamp(fraction * (b * win - loss) / (b * (win + loss)), 0.0, 0.02);
+    return kelly_at_decimal(win, push, decimal_odds(american), fraction);
+}
+double fractional_kelly(double win, double push, const json &quote, double fraction) {
+    return kelly_at_decimal(win, push, quote_decimal_odds(quote), fraction);
+}
+json first_basket_counts(const json &player, const std::string &starts_at) {
+    // Aggregate legacy counts are supported, but only dated observations can be leakage-guarded.
+    if (!player.contains("firstBasketHistory"))
+        return {{"games", player.value("firstBasketGames", json(0))},
+                {"wins", player.value("firstBasketWins", json(0))}};
+    int games = 0, wins = 0;
+    for (const auto &observation : player["firstBasketHistory"])
+        if (observation.value("date", "") < starts_at.substr(0, 10)) {
+            ++games;
+            if (observation.value("win", false))
+                ++wins;
+        }
+    return {{"games", games}, {"wins", wins}};
 }
 json wilson_interval(double p, double n) {
     n = std::max(1.0, n);
@@ -274,6 +343,7 @@ json empty_snapshot(const std::string &mode) {
             {"players", json::object()},
             {"teams", json::object()},
             {"quotes", json::array()},
+            {"lineups", json::array()},
             {"sources", json::array()},
             {"refreshing", false},
             {"revision", 0}};
@@ -283,27 +353,27 @@ json feature_catalog() {
     return json::array({{{"group", "Player history"},
                          {"label", "Minutes / recent rotation"},
                          {"role", "used"},
-                         {"source", "NBA game logs"}},
+                         {"source", "NBA game logs / local historical box scores"}},
                         {{"group", "Player history"},
                          {"label", "Points per minute"},
                          {"role", "used"},
-                         {"source", "NBA game logs"}},
+                         {"source", "NBA game logs / local historical box scores"}},
                         {{"group", "Player history"},
                          {"label", "Rebounds per minute"},
                          {"role", "used"},
-                         {"source", "NBA game logs"}},
+                         {"source", "NBA game logs / local historical box scores"}},
                         {{"group", "Player history"},
                          {"label", "Assists per minute"},
                          {"role", "used"},
-                         {"source", "NBA game logs"}},
+                         {"source", "NBA game logs / local historical box scores"}},
                         {{"group", "Player history"},
                          {"label", "3PM per minute"},
                          {"role", "used"},
-                         {"source", "NBA game logs"}},
+                         {"source", "NBA game logs / local historical box scores"}},
                         {{"group", "Player history"},
                          {"label", "Steals & blocks"},
                          {"role", "used"},
-                         {"source", "NBA game logs"}},
+                         {"source", "NBA game logs / local historical box scores"}},
                         {{"group", "Player history"},
                          {"label", "Joint P/R/A/STL/BLK covariance"},
                          {"role", "used"},
@@ -323,7 +393,7 @@ json feature_catalog() {
                         {{"group", "Player history"},
                          {"label", "FGA / FTA / 3PA volume"},
                          {"role", "context"},
-                         {"source", "NBA game logs"}},
+                         {"source", "NBA game logs / local historical box scores"}},
                         {{"group", "Player history"},
                          {"label", "Effective FG% / true shooting%"},
                          {"role", "context"},
@@ -331,15 +401,15 @@ json feature_catalog() {
                         {{"group", "Player history"},
                          {"label", "Turnovers / offensive rebounds / fouls"},
                          {"role", "context"},
-                         {"source", "NBA game logs"}},
+                         {"source", "NBA game logs / local historical box scores"}},
                         {{"group", "Team environment"},
                          {"label", "Team & opponent pace"},
                          {"role", "used"},
-                         {"source", "NBA advanced team stats"}},
+                         {"source", "NBA advanced stats / approximate historical box-score fallback"}},
                         {{"group", "Team environment"},
                          {"label", "Offensive / defensive / net rating"},
                          {"role", "used"},
-                         {"source", "NBA advanced team stats"}},
+                         {"source", "NBA advanced stats / approximate historical box-score fallback"}},
                         {{"group", "Team environment"},
                          {"label", "Chronological team Elo"},
                          {"role", "used"},
@@ -371,7 +441,7 @@ json feature_catalog() {
                         {{"group", "Availability"},
                          {"label", "Historical first-FG winners"},
                          {"role", "used"},
-                         {"source", "Explicit user-supplied first-basket history"}},
+                         {"source", "Dated play-by-play first-FG opportunities / supplied counts"}},
                         {{"group", "Availability"},
                          {"label", "Complete 10-starter first-basket field"},
                          {"role", "guard"},
@@ -637,6 +707,8 @@ json demo_snapshot() {
 json evaluate_quote(const json &q, const json &s) {
     json r = q;
     r["marketLabel"] = labels.at(q.value("market", "moneyline"));
+    r["oddsPercent"] = has_quote_price(q) ? json(100 * quote_implied_probability(q)) : json(nullptr);
+    r["impliedProbability"] = has_quote_price(q) ? json(quote_implied_probability(q)) : json(nullptr);
     r["features"] = json::array();
     r["caveats"] = json::array();
     r["recent"] = json::array();
@@ -698,7 +770,7 @@ json evaluate_quote(const json &q, const json &s) {
         return blocked(r, "Market is suspended or closed.");
     if (q.value("settlement", "full_game_including_ot") != "full_game_including_ot")
         return blocked(r, "Only full-game including-overtime settlement is supported.");
-    if (!q.contains("americanOdds") || q["americanOdds"].is_null())
+    if (!has_quote_price(q))
         return blocked(r, "No public bookmaker quote. Import a current price to evaluate EV.");
     const auto market = q.value("market", "");
     const auto side = q.value("side", "");
@@ -725,6 +797,13 @@ json evaluate_quote(const json &q, const json &s) {
             return blocked(r, "Missing historical team ratings.");
         const auto &h = s["teams"][home];
         const auto &a = s["teams"][away];
+        if (h.contains("historySource") || a.contains("historySource")) {
+            r["historySource"] = "basketball_reference";
+            r["caveats"].push_back(
+                "Local historical box scores supply team game vectors and approximate "
+                "possession/rating fallback where official data is missing. Coverage may be "
+                "partial; old environments are not made fresh by reloading.");
+        }
         if (s.value("mode", "demo") == "live")
             for (const auto *t : {&h, &a})
                 if (epoch_now() - parse_time(t->value("dataAsOf", "")) > 172800)
@@ -805,6 +884,13 @@ json evaluate_quote(const json &q, const json &s) {
         const auto &pl = s["players"][key];
         r["player"] = pl.value("name", q.value("player", ""));
         r["injury"] = pl.value("injury", "Unknown");
+        if (pl.contains("historySource")) {
+            r["historySource"] = pl["historySource"];
+            r["caveats"].push_back(
+                "Local Basketball Reference history supplies game logs and/or dated "
+                "first-FG opportunities. Coverage can be partial; data is not independently "
+                "verified. Historical lineups never confirm current starters.");
+        }
         if (pl.value("team", "") != team)
             return blocked(r, "Player team does not match the quoted selection.");
         const auto injury = normalize_name(pl.value("injury", ""));
@@ -819,7 +905,7 @@ json evaluate_quote(const json &q, const json &s) {
             if (live)
                 return blocked(r, "First-basket markets are disabled once a game has started.");
             double total = 0, target = 0;
-            int field = 0;
+            int field = 0, home_starters = 0, away_starters = 0;
             double smallest = 1e9;
             for (const auto &item : s["players"].items()) {
                 const auto &candidate = item.value();
@@ -832,8 +918,8 @@ json evaluate_quote(const json &q, const json &s) {
                     return blocked(
                         r,
                         "A confirmed first-basket starter is marked out/inactive. Resolve the lineup first.");
-                double n = number(candidate.value("firstBasketGames", json(0))),
-                       w = number(candidate.value("firstBasketWins", json(0)));
+                const auto counts = first_basket_counts(candidate, g.value("startsAt", ""));
+                double n = number(counts["games"]), w = number(counts["wins"]);
                 if (n < 20 || w > n)
                     return blocked(r,
                                    "All 10 confirmed starters need at least 20 first-basket history games.");
@@ -841,10 +927,14 @@ json evaluate_quote(const json &q, const json &s) {
                 total += rate;
                 smallest = std::min(smallest, n);
                 ++field;
+                if (ct == home)
+                    ++home_starters;
+                else
+                    ++away_starters;
                 if (item.key() == key)
                     target = rate;
             }
-            if (field != 10 || target <= 0)
+            if (field != 10 || home_starters != 5 || away_starters != 5 || target <= 0)
                 return blocked(r, "First basket needs a complete field of 10 starters confirmed for this "
                                   "specific game, not "
                                   "scoring-rate guesses.");
@@ -856,8 +946,17 @@ json evaluate_quote(const json &q, const json &s) {
             r["projectionLabel"] = "First-basket probability";
             projected = p * 100;
             feature(r, "Confirmed starters", field, "players");
-            feature(r, "First-basket wins", number(pl["firstBasketWins"]), "games");
-            feature(r, "First-basket history", number(pl["firstBasketGames"]), "games");
+            const auto counts = first_basket_counts(pl, g.value("startsAt", ""));
+            feature(r, "First-basket wins", number(counts["wins"]), "games");
+            feature(r, "First-basket history", number(counts["games"]), "games");
+            if (pl.contains("firstBasketHistory"))
+                r["caveats"].push_back(
+                    "Dated first-FG opportunities exclude the target day and future games. "
+                    "Historical starters do not confirm today's lineup.");
+            else
+                r["caveats"].push_back(
+                    "Legacy aggregate first-FG counts have no game dates; their historical "
+                    "cutoff cannot be independently checked.");
             r["caveats"].push_back(
                 "First basket is the first made field goal, not the first point/free throw. Verify identical "
                 "bookmaker settlement rules. Historical frequencies are matchup-independent.");
@@ -1082,13 +1181,11 @@ json evaluate_quote(const json &q, const json &s) {
     r["effectiveSampleSize"] = neff;
     r["samplingInterval"] = wilson_interval(p, neff);
     r["quality"] = neff >= 30 ? "Larger sample" : neff >= 20 ? "Moderate sample" : "Small sample";
-    int odds = q["americanOdds"];
-    r["impliedProbability"] = implied_probability(odds);
-    r["decimalOdds"] = decimal_odds(odds);
+    r["decimalOdds"] = quote_decimal_odds(q);
     if (fresh) {
-        r["ev"] = expected_value(p, push, odds);
-        r["conservativeEv"] = expected_value(number(r["samplingInterval"]["lower"]), push, odds);
-        r["kellyFraction"] = fractional_kelly(p, push, odds);
+        r["ev"] = expected_value(p, push, q);
+        r["conservativeEv"] = expected_value(number(r["samplingInterval"]["lower"]), push, q);
+        r["kellyFraction"] = fractional_kelly(p, push, q);
         r["eligible"] = true;
     } else {
         r["conservativeEv"] = nullptr;
@@ -1129,7 +1226,7 @@ json build_dashboard(const json &snapshot) {
     }
     // De-vig only matching, opposite, same-book quotes. Never mix lines, events, subjects or old timestamps.
     for (auto &r : result["markets"]) {
-        if (!r.contains("americanOdds") || r["americanOdds"].is_null())
+        if (!has_quote_price(r))
             continue;
         const auto market = r.value("market", "");
         const auto side = r.value("side", "");
@@ -1144,12 +1241,11 @@ json build_dashboard(const json &snapshot) {
                 q.value("side", "") != opposite || q.value("book", "") != r.value("book", "") ||
                 q.value("player", "") != r.value("player", "") ||
                 (market != "moneyline" && q.value("team", "") != r.value("team", "")) ||
-                q.value("line", json()) != r.value("line", json()) || !q.contains("americanOdds") ||
-                q["americanOdds"].is_null() || q.value("freshness", "") != "fresh" ||
-                r.value("freshness", "") != "fresh" ||
+                q.value("line", json()) != r.value("line", json()) || !has_quote_price(q) ||
+                q.value("freshness", "") != "fresh" || r.value("freshness", "") != "fresh" ||
                 std::abs(parse_time(q.value("observedAt", "")) - parse_time(r.value("observedAt", ""))) > 90)
                 continue;
-            double p0 = implied_probability(r["americanOdds"]), p1 = implied_probability(q["americanOdds"]);
+            double p0 = quote_implied_probability(r), p1 = quote_implied_probability(q);
             r["fairProbability"] = p0 / (p0 + p1);
             r["overround"] = (p0 + p1 - 1) * 100;
             if (!r["probability"].is_null() && number(r["pushProbability"]) < 1)
@@ -1276,11 +1372,9 @@ json validate_import(const json &document) {
     if (!document.is_object())
         throw std::invalid_argument(
             "Import must be a JSON object containing quotes, players, teams, or games.");
-    json out = {{"quotes", json::array()},
-                {"players", json::object()},
-                {"teams", json::object()},
-                {"games", json::array()},
-                {"demoOnly", document.value("synthetic", false)}};
+    json out = {{"quotes", json::array()},  {"players", json::object()},
+                {"teams", json::object()},  {"games", json::array()},
+                {"lineups", json::array()}, {"demoOnly", document.value("synthetic", false)}};
     if (document.contains("quotes")) {
         if (!document["quotes"].is_array() || document["quotes"].size() > 2000)
             throw std::invalid_argument("quotes must be an array with at most 2,000 entries");
@@ -1296,10 +1390,7 @@ json validate_import(const json &document) {
                 throw std::invalid_argument("Unsupported market: " + market);
             if (!teams.count(q["team"].get<std::string>()))
                 throw std::invalid_argument("Use a standard NBA team abbreviation, e.g. GSW, LAL, NYK.");
-            require_number(q, "americanOdds", -100000, 100000);
-            if (!q["americanOdds"].is_number_integer())
-                throw std::invalid_argument("americanOdds must be an integer");
-            decimal_odds(q["americanOdds"]);
+            normalize_price(q);
             auto timestamp = parse_time(q["observedAt"]);
             if (!timestamp || q["observedAt"].get<std::string>().size() != 20)
                 throw std::invalid_argument("observedAt must be a real UTC timestamp: YYYY-MM-DDTHH:MM:SSZ");
@@ -1439,6 +1530,8 @@ json validate_import(const json &document) {
             if (log.contains("home") && !log["home"].is_boolean())
                 throw std::invalid_argument("home must be a boolean");
         }
+        if (p.contains("injury"))
+            require_string(p, "injury", 160);
         if (p.contains("projectedMinutes"))
             require_number(p, "projectedMinutes", 0.1, 48);
         if (p.contains("historicalPace"))
@@ -1450,6 +1543,21 @@ json validate_import(const json &document) {
         if (p.contains("firstBasketGames")) {
             require_number(p, "firstBasketGames", 0, 2000);
             require_number(p, "firstBasketWins", 0, number(p["firstBasketGames"]));
+        }
+        if (p.contains("firstBasketHistory")) {
+            if (!p["firstBasketHistory"].is_array() || p["firstBasketHistory"].size() > 2000)
+                throw std::invalid_argument("firstBasketHistory must contain <=2000 dated starter games");
+            std::set<std::string> game_ids;
+            for (const auto &observation : p["firstBasketHistory"]) {
+                require_identifier(observation, "gameId");
+                require_string(observation, "date", 10);
+                if (observation["date"].get<std::string>().size() != 10 || !parse_time(observation["date"]) ||
+                    !game_ids.insert(observation["gameId"]).second || !observation.contains("win") ||
+                    !observation["win"].is_boolean())
+                    throw std::invalid_argument("Invalid or duplicate dated first-basket observation");
+            }
+            p.erase("firstBasketGames");
+            p.erase("firstBasketWins");
         }
         if (p.contains("live")) {
             auto &box = p["live"];
@@ -1472,7 +1580,24 @@ json validate_import(const json &document) {
             throw std::invalid_argument("Player name has no matchable letters");
         out["players"][normalize_name(p["name"])] = p;
     }
-    if (out["quotes"].empty() && out["games"].empty() && out["players"].empty() && out["teams"].empty())
+    if (document.contains("lineups")) {
+        if (!document["lineups"].is_array() || document["lineups"].size() > 100)
+            throw std::invalid_argument("lineups must contain <=100 game-scoped player confirmations");
+        for (auto lineup : document["lineups"]) {
+            require_identifier(lineup, "gameId");
+            require_string(lineup, "player", 100);
+            require_string(lineup, "team", 3);
+            if (normalize_name(lineup.value("player", "")).empty())
+                throw std::invalid_argument("Lineup player has no matchable name");
+            if (!teams.count(lineup["team"]) || !lineup.contains("confirmed") ||
+                !lineup["confirmed"].is_boolean())
+                throw std::invalid_argument("Lineups require a standard NBA team and boolean confirmed");
+            lineup["source"] = "user_import";
+            out["lineups"].push_back(lineup);
+        }
+    }
+    if (out["quotes"].empty() && out["games"].empty() && out["players"].empty() && out["teams"].empty() &&
+        out["lineups"].empty())
         throw std::invalid_argument("Import contains no records");
     return out;
 }
@@ -1487,7 +1612,9 @@ json parse_csv_import(const std::string &input) {
         if (!headers.emplace(rows[0][i], i).second)
             throw std::invalid_argument("Duplicate CSV header");
     }
-    for (auto key : {"gameId", "market", "side", "team", "book", "americanOdds", "observedAt"})
+    if (!headers.count("oddsPercent") && !headers.count("americanOdds"))
+        throw std::invalid_argument("CSV requires oddsPercent or legacy americanOdds");
+    for (auto key : {"gameId", "market", "side", "team", "book", "observedAt"})
         if (!headers.count(key))
             throw std::invalid_argument(std::string("Missing CSV column: ") + key);
     json quotes = json::array();
@@ -1497,7 +1624,7 @@ json parse_csv_import(const std::string &input) {
         json q = json::object();
         for (const auto &field : headers) {
             const auto &str = rows[r][field.second];
-            if (field.first == "line" || field.first == "americanOdds") {
+            if (field.first == "line" || field.first == "americanOdds" || field.first == "oddsPercent") {
                 if (str.empty())
                     q[field.first] = nullptr;
                 else {
@@ -1551,13 +1678,43 @@ void merge_import(json &snapshot, const json &validated) {
         if (!found)
             snapshot["quotes"].push_back(q);
     }
+    if (validated.contains("lineups")) {
+        if (!snapshot.contains("lineups"))
+            snapshot["lineups"] = json::array();
+        for (const auto &lineup : validated["lineups"]) {
+            const auto key = normalize_name(lineup.value("player", ""));
+            bool found = false;
+            for (auto &old : snapshot["lineups"])
+                if (old.value("gameId", "") == lineup.value("gameId", "") &&
+                    normalize_name(old.value("player", "")) == key) {
+                    old = lineup;
+                    found = true;
+                    break;
+                }
+            if (!found)
+                snapshot["lineups"].push_back(lineup);
+        }
+        if (snapshot["lineups"].size() > 100)
+            throw std::invalid_argument("Combined lineups exceed 100 confirmations; clear old imports");
+        // Apply all retained confirmations after feature records. A lineup-only import doesn't replace logs.
+        for (const auto &lineup : snapshot["lineups"]) {
+            const auto key = normalize_name(lineup.value("player", ""));
+            if (!snapshot["players"].contains(key))
+                continue; // A confirmation alone is not historical player data.
+            auto &player = snapshot["players"][key];
+            if (player.value("team", "") != lineup.value("team", ""))
+                continue; // Do not undo a fresh roster/team assignment.
+            player["starterConfirmed"] = lineup["confirmed"];
+            player["starterGameId"] = lineup["gameId"];
+        }
+    }
     snapshot["generatedAt"] = now_iso();
 }
 std::string csv_template(const json &snapshot) {
     const bool any = !snapshot["games"].empty();
     const auto id = any ? snapshot["games"][0].value("id", "") : "REPLACE_WITH_GAME_ID";
     const auto team = any ? snapshot["games"][0].value("home", "LAL") : "LAL";
-    return "gameId,market,player,team,side,line,americanOdds,book,observedAt,settlement\r\n" + id +
+    return "gameId,market,player,team,side,line,oddsPercent,book,observedAt,settlement\r\n" + id +
            ",moneyline,," + team + ",home,,,REPLACE_WITH_BOOK," + now_iso() + ",full_game_including_ot\r\n";
 }
 json score_backtest(const json &doc) {
@@ -1569,7 +1726,8 @@ json score_backtest(const json &doc) {
         require_number(row, "probability", 0.000001, 0.999999);
         if (row.contains("pushProbability"))
             require_number(row, "pushProbability", 0, 0.999999);
-        require_number(row, "americanOdds", -100000, 100000);
+        json price = row;
+        normalize_price(price);
         require_string(row, "predictedAt", 20);
         require_string(row, "startsAt", 20);
         require_string(row, "result", 10);
@@ -1580,11 +1738,10 @@ json score_backtest(const json &doc) {
         if (outcome != "win" && outcome != "loss" && outcome != "push")
             throw std::invalid_argument("Result must be win, loss or push");
         double p = number(row["probability"]), push = number(row.value("pushProbability", json(0)));
-        if (push < 0 || p + push >= 1 || !row["americanOdds"].is_number_integer())
-            throw std::invalid_argument(
-                "Backtest odds must be integers and win + push probability must be below 1");
-        int odds = row["americanOdds"];
-        auto d = decimal_odds(odds);
+        if (push < 0 || p + push >= 1)
+            throw std::invalid_argument("Backtest win + push probability must be below 1");
+
+        auto d = quote_decimal_odds(price);
         double resolved_p = p / (1 - push);
         if (outcome != "push") {
             double y = outcome == "win" ? 1 : 0;
@@ -1592,7 +1749,7 @@ json score_backtest(const json &doc) {
             logloss -= y * std::log(resolved_p) + (1 - y) * std::log(1 - resolved_p);
             ++resolved;
         }
-        if (expected_value(p, push, odds) > doc.value("minEv", 0.0)) {
+        if (expected_value(p, push, price) > doc.value("minEv", 0.0)) {
             ++selected;
             staked += 1;
             if (outcome == "win") {

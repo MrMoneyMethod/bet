@@ -30,7 +30,7 @@ document = {
     'players': [{'name': 'Stephen Curry', 'team': 'GSW', 'logs': logs, 'historicalPace': 100,
                  'injury': 'Available (synthetic example)', 'dataAsOf': iso(now)}],
     'quotes': [{'gameId': 'custom-sample', 'market': 'points', 'player': 'Stephen Curry', 'team': 'GSW',
-                'side': side, 'line': 26.5, 'americanOdds': -110, 'book': 'SYNTHETIC example book',
+                'side': side, 'line': 26.5, 'oddsPercent': 52.38, 'book': 'SYNTHETIC example book',
                 'observedAt': iso(now), 'settlement': 'full_game_including_ot'} for side in ('over','under')]
 }
 print(json.dumps(document, indent=2))

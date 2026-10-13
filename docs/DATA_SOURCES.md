@@ -14,8 +14,15 @@ No API keys or sportsbook credentials are requested. Keyless public access is no
 | NBA stats | `https://stats.nba.com/stats/leaguegamelog?...PlayerOrTeam=T...` | Paired chronological team results, point/margin variance, windowed Elo, rest dates | 6 hours; at most 48-hour cache fallback |
 | ESPN rosters | `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{id}/roster` | Roster/name/team crosswalk and listed injury context | 1 hour; at most 2-hour cache fallback |
 | ESPN summary | `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={id}` | Live player minutes/accrued stats, starter flags, pick-center explicit moneylines when present | 30 seconds; no stale live fallback |
+| Optional authorized Basketball Reference history | Local SQLite archive and streaming feature export; historical HTTPS collection is separate from the app | All parsed timed PBP events, paired box-score vectors, dated first-FG opportunities and approximate team environment fallback | No corpus bundled or full crawl run here. Source permission required; coverage/gaps explicit. See [historical setup](HISTORICAL_DATA.md). |
 | User CSV/JSON | Local import only | All requested odds markets; explicit schedules/history/feature overrides | Quote times preserved. Validate accuracy yourself. |
 | User saved HTML | Local data extraction | Embedded ESPN/normalized JSON; Basketball Reference-style game-log tables | No browsing, crawling or script execution |
+| Polymarket moneylines | gamma-api.polymarket.com (keyless) | Game-winner traded probabilities only; futures/spreads/totals ignored | Indicative exchange price; no liquidity/size guarantee |
+| Kalshi moneylines | external-api.kalshi.com trade API (keyless) | NBA game markets matched by structured tickers; bid/ask midpoint else last trade | Indicative exchange price; names in titles truncate, tickers do not |
+| Pinnacle moneylines | guest.api.arcadia.pinnacle.com (anonymous guest feed) | Exact American prices; game totals never mapped to team totals | Undocumented endpoint; may change or block |
+
+The full catalog of investigated keyless sources (probed endpoints, open datasets,
+free-key exclusions and dead ends) is in [KEYLESS_SOURCES.md](KEYLESS_SOURCES.md).
 
 The NBA player endpoint uses the recent 210-day window; histories are limited to 60 recent games per player. If the current-season player response successfully returns zero rows, the prior regular season is requested. A failed/blocked current-season request is **not** treated as proof that a prior-season endpoint will work. Preseason forecasts remain disabled.
 
@@ -27,7 +34,13 @@ ESPN public moneyline prices are **indicative**, not independently verified exec
 
 No all-books prop prices are manufactured from implied model probabilities, game totals, spreads, league averages or demo rows. Team-total odds are not inferred from the game total. A scheduled game without public prices produces explicit unpriced placeholders and zero +EV claims.
 
-Player-prop odds are supplied by local CSV/JSON/manual quote import. First basket additionally needs confirmed lineups and historical first-FG counts, which are not bundled as an automatic corpus.
+Player-prop odds are supplied by local CSV/JSON/manual quote import. All bookmaker prices are displayed as implied percentages including book margin, separate from Model % and paired no-vig percentages. First basket additionally needs current confirmed lineups; dated first-FG opportunities can come from the installed optional historical archive or explicit supplied history. No actual historical corpus is bundled.
+
+## Historical collection
+
+The optional standard-library Python collector discovers completed NBA games through season/month schedules, pairs box scores with complete PBP pages, caches content-hashed originals, persists every parsed timed event and checkpoints progress in SQLite. It is permission gated, checks robots (including wildcard/anchored rules), waits at least 3.1 seconds between requests and stops on access/rate-limit denial without bypasses. It does not run on each live refresh. The C++ app reads bounded exported features and reports coverage. Current provider responses/full historical coverage were **not** verified here. [Collection, permissions and model use](HISTORICAL_DATA.md).
+
+The native historical/model workspace can be opened with `--live --offline` to disable all live public requests, retaining local history/imports and freshness/settlement guards.
 
 ## Scraping implemented
 
@@ -49,7 +62,7 @@ The historical SBR reference was reviewed for data/odds separation and parsing p
 
 - HTTPS GET only to a fixed source hostname allowlist; no custom ports, credentials, localhost targets or redirects.
 - Descriptive application user agent; Windows certificate validation remains enabled.
-- Timeouts, 16 MB source-response cap, 4 MB imports, 24 network requests per refresh maximum and at least 250 ms between source requests.
+- Timeouts, 16 MB source-response cap, 4 MB imports, 36 network requests per refresh maximum and at least 250 ms between source requests.
 - Cache avoids refetching season stats/rosters every score refresh.
 - Failed/blocked/rate-limited sources are surfaced in **Model lab → Data sources**. The code does not retry through bypasses.
 - Desktop public-data requests originate on your computer, not in browser JavaScript, avoiding provider CORS requirements.
@@ -59,4 +72,4 @@ The reference/source software licenses do not grant NBA, ESPN, Basketball Refere
 
 ## Sandbox limitation
 
-The development environment allows outbound access only to GitHub/npm/PyPI hosts, so NBA/ESPN providers cannot be live-verified here. The default preview is **clearly synthetic**. Public endpoint schemas were translated from inspected GitHub reference definitions and fixture-tested. Test actual feed availability on Windows before assuming any quote/history coverage.
+The development environment allows outbound access only to GitHub/npm/PyPI hosts, so NBA/ESPN providers and a full Basketball Reference crawl cannot be live-verified here. The default preview is **clearly synthetic**. Public endpoint schemas were translated from inspected GitHub reference definitions and fixture-tested. Test actual feed availability on Windows before assuming any quote/history coverage.
