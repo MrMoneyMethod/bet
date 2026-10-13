@@ -54,6 +54,8 @@ std::string hoop_team(const std::string &raw) {
     static const std::map<std::string, std::string> aliases = {{"GS", "GSW"}, {"NY", "NYK"}, {"SA", "SAS"},
                                                                {"NO", "NOP"}, {"UTAH", "UTA"}, {"WSH", "WAS"}};
     auto value = upper_copy(trim_copy(raw));
+    if (value == "NA" || value == "NULL")
+        return "";
     const auto found = aliases.find(value);
     return found == aliases.end() ? value : found->second;
 }
@@ -68,6 +70,29 @@ double parse_double(const std::string &raw, double fallback = 0) {
         return fallback;
     }
 }
+// hoopR releases may encode minutes as decimal minutes or MM:SS.
+// Do not silently truncate the seconds with std::stod("30:30").
+double parse_minutes(const std::string &raw) {
+    const auto value = trim_copy(raw);
+    try {
+        size_t used = 0;
+        const auto colon = value.find(':');
+        double minutes = std::stod(value, &used);
+        if (colon != std::string::npos) {
+            if (used != colon || minutes < 0 || std::floor(minutes) != minutes)
+                return 0;
+            const auto seconds_text = value.substr(colon + 1);
+            const double seconds = std::stod(seconds_text, &used);
+            if (used != seconds_text.size() || !std::isfinite(seconds) || seconds < 0 || seconds >= 60)
+                return 0;
+            minutes += seconds / 60.0;
+        } else if (used != value.size())
+            return 0;
+        return std::isfinite(minutes) && minutes >= 0 ? minutes : 0;
+    } catch (...) {
+        return 0;
+    }
+}
 long long parse_stat(const std::string &raw) {
     return static_cast<long long>(std::llround(parse_double(raw, 0)));
 }
@@ -79,6 +104,13 @@ class CsvReader {
     explicit CsvReader(const std::filesystem::path &path) : stream_(path, std::ios::binary) {
         if (!stream_)
             throw std::invalid_argument("Cannot open CSV file: " + path.filename().string());
+        // Consume a UTF-8 BOM before CSV tokenization, including quoted headers.
+        char bom[3];
+        stream_.read(bom, 3);
+        if (stream_.gcount() != 3 || std::string(bom, 3) != "\xEF\xBB\xBF") {
+            stream_.clear();
+            stream_.seekg(0);
+        }
         std::vector<std::string> header;
         if (next(header)) {
             for (size_t i = 0; i < header.size(); ++i)
@@ -178,14 +210,25 @@ json build_history_bundle(const std::filesystem::path &history_dir, const std::v
     std::vector<std::string> order;
     long long rejected = 0;
     std::vector<std::string> missing_examples;
+    std::map<std::string, int> rejection_reasons;
     auto reject_game = [&](HistGame &game, const std::string &reason) {
         if (game.rejected)
             return;
         game.rejected = true;
         game.rejectReason = reason;
         ++rejected;
+        ++rejection_reasons[reason];
         if (missing_examples.size() < 5)
             missing_examples.push_back(game.id + ": " + reason);
+    };
+    auto set_team = [&](HistGame &game, std::string &side, const std::string &raw) {
+        const auto team = hoop_team(raw);
+        if (team.empty())
+            return;
+        if (!side.empty() && side != team)
+            reject_game(game, "conflicting home/away team metadata");
+        else
+            side = team;
     };
     for (const int season : seasons) {
         const auto label = "player_box_" + std::to_string(season) + ".csv";
@@ -203,8 +246,9 @@ json build_history_bundle(const std::filesystem::path &history_dir, const std::v
                       c_dnp = csv.column({"did_not_play"}, "did-not-play flag", false, label),
                       c_minutes = csv.column({"minutes", "min"}, "minutes", true, label),
                       c_date = csv.column({"game_date", "date"}, "game date", false, label),
-                      c_home = csv.column({"home_team_abbreviation", "home_team_abbr"}, "home team", false, label),
-                      c_away = csv.column({"away_team_abbreviation", "away_team_abbr"}, "away team", false, label),
+                      c_home = csv.column({"home_team_abbreviation", "home_team_abbr", "home_team_abbrev"}, "home team", false, label),
+                      c_away = csv.column({"away_team_abbreviation", "away_team_abbr", "away_team_abbrev"}, "away team", false, label),
+                      c_role = csv.column({"home_away", "team_home_away"}, "home/away role", false, label),
                       c_type = csv.column({"season_type"}, "season type", false, label);
             std::map<std::string, int> stat_cols;
             for (const auto &field : kStatFields) {
@@ -227,16 +271,22 @@ json build_history_bundle(const std::filesystem::path &history_dir, const std::v
                 }
                 if (c_date >= 0 && game.date.empty())
                     game.date = trim_copy(CsvReader::at(row, c_date)).substr(0, 10);
-                if (c_home >= 0 && game.home.empty())
-                    game.home = hoop_team(CsvReader::at(row, c_home));
-                if (c_away >= 0 && game.away.empty())
-                    game.away = hoop_team(CsvReader::at(row, c_away));
+                set_team(game, game.home, CsvReader::at(row, c_home));
+                set_team(game, game.away, CsvReader::at(row, c_away));
                 if (c_type >= 0) {
                     const auto type = trim_copy(CsvReader::at(row, c_type));
                     game.seasonType = (type == "3" || type == "playoffs") ? "playoffs" : "regular";
                 }
+                const auto team = hoop_team(CsvReader::at(row, c_team));
+                const auto role = upper_copy(trim_copy(CsvReader::at(row, c_role)));
+                if (role == "HOME")
+                    set_team(game, game.home, team);
+                else if (role == "AWAY")
+                    set_team(game, game.away, team);
+                if (game.rejected)
+                    continue;
                 const bool starter = truthy(CsvReader::at(row, c_starter));
-                const double minutes = parse_double(CsvReader::at(row, c_minutes), 0);
+                const double minutes = parse_minutes(CsvReader::at(row, c_minutes));
                 if ((c_dnp >= 0 && truthy(CsvReader::at(row, c_dnp))) || (minutes <= 0 && !starter))
                     continue;
                 if (starter && minutes <= 0) {
@@ -248,7 +298,7 @@ json build_history_bundle(const std::filesystem::path &history_dir, const std::v
                     log[field] = stat_cols.count(field) ? parse_stat(CsvReader::at(row, stat_cols[field])) : 0;
                 game.players.push_back({"espn-" + trim_copy(CsvReader::at(row, c_athlete)),
                                         trim_copy(CsvReader::at(row, c_name)),
-                                        hoop_team(CsvReader::at(row, c_team)), starter, log});
+                                        team, starter, log});
             }
         }
         const auto pbp_label = "play_by_play_" + std::to_string(season) + ".csv";
@@ -262,8 +312,8 @@ json build_history_bundle(const std::filesystem::path &history_dir, const std::v
                       c_away_score = csv.column({"away_score"}, "away score", false, pbp_label),
                       c_home_score = csv.column({"home_score"}, "home score", false, pbp_label),
                       c_athlete = csv.column({"athlete_id_1"}, "primary athlete", false, pbp_label),
-                      c_home = csv.column({"home_team_abbreviation", "home_team_abbr"}, "home team", false, pbp_label),
-                      c_away = csv.column({"away_team_abbreviation", "away_team_abbr"}, "away team", false, pbp_label);
+                      c_home = csv.column({"home_team_abbreviation", "home_team_abbr", "home_team_abbrev"}, "home team", false, pbp_label),
+                      c_away = csv.column({"away_team_abbreviation", "away_team_abbr", "away_team_abbrev"}, "away team", false, pbp_label);
             csv.column({"text", "play_text", "description"}, "play text", true, pbp_label);
             std::vector<std::string> row;
             while (csv.next(row)) {
@@ -271,10 +321,8 @@ json build_history_bundle(const std::filesystem::path &history_dir, const std::v
                 if (found == games.end() || found->second.rejected)
                     continue;
                 auto &game = found->second;
-                if (c_home >= 0 && game.home.empty())
-                    game.home = hoop_team(CsvReader::at(row, c_home));
-                if (c_away >= 0 && game.away.empty())
-                    game.away = hoop_team(CsvReader::at(row, c_away));
+                set_team(game, game.home, CsvReader::at(row, c_home));
+                set_team(game, game.away, CsvReader::at(row, c_away));
                 const auto period_raw = trim_copy(CsvReader::at(row, c_period));
                 if (period_raw.empty() || parse_double(period_raw, -1) < 0)
                     continue;
@@ -306,7 +354,7 @@ json build_history_bundle(const std::filesystem::path &history_dir, const std::v
         std::set<std::string> teams;
         for (const auto &player : game.players)
             teams.insert(player.team);
-        if (teams.size() != 2 || game.date.empty() || game.home.empty() || game.away.empty() ||
+        if (teams.size() != 2 || (game.date.size() != 10 || !parse_time(game.date)) || game.home.empty() || game.away.empty() ||
             !teams.count(game.home) || !teams.count(game.away) || game.home == game.away) {
             reject_game(game, "missing date or home/away teams");
             continue;
@@ -337,8 +385,17 @@ json build_history_bundle(const std::filesystem::path &history_dir, const std::v
         total_events += game.events;
         completed.push_back(&game);
     }
-    if (completed.empty())
-        throw std::invalid_argument("No complete games could be built from the downloaded CSVs");
+    if (completed.empty()) {
+        std::string message = "No complete games could be built from the downloaded CSVs (" +
+                              std::to_string(games.size()) + " games read, " + std::to_string(rejected) +
+                              " rejected).";
+        for (const auto &reason : rejection_reasons)
+            message += " " + std::to_string(reason.second) + " x " + reason.first + ".";
+        if (!missing_examples.empty())
+            message += " Example: " + missing_examples.front() + ".";
+        message += " Cached CSVs and the previous history bundle have been retained.";
+        throw std::invalid_argument(message);
+    }
     std::sort(completed.begin(), completed.end(), [](const HistGame *a, const HistGame *b) {
         return a->date != b->date ? a->date < b->date : a->id < b->id;
     });
@@ -496,6 +553,7 @@ json build_history_bundle(const std::filesystem::path &history_dir, const std::v
                      {"events", total_events},
                      {"missingGames", rejected},
                      {"missingExamples", missing_examples},
+                     {"rejectionReasons", rejection_reasons},
                      {"firstDate", first_date},
                      {"lastDate", last_date},
                      {"asOf", as_of_date},
@@ -872,7 +930,9 @@ void HistoryDownloader::run() {
             ++done;
         }
         std::vector<int> available;
-        std::string fingerprint;
+        // Invalidate bundles produced with the old hoopR column mapping, even
+        // when the raw downloads are unchanged. Advance the exclusive cutoff daily.
+        std::string fingerprint = "hoopr-v2:" + now_iso().substr(0, 10) + ";";
         for (const int season : seasons) {
             const auto box = downloads / ("player_box_" + std::to_string(season) + ".csv");
             std::error_code ec;

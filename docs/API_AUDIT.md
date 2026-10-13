@@ -73,3 +73,28 @@ node tests/browser_activity.mjs http://127.0.0.1:3000
 ```
 
 Windows multi-config builds put executables under `build/Release/`; use `ctest -C Release`. Never put keys in the probe command, report, browser or Git. Before relying on live data, obtain a schema-valid live response, confirm NBA event/token joins against the provider, and check your provider's current terms and limits.
+
+
+## Reported-error hotfix (2026-10-13)
+
+- **NBA season schedule:** optional explicit JSON nulls, null collections and
+  malformed neighbouring rows no longer abort a valid matched game. The useful
+  schedule fix from PR #12 was ported without its obsolete Pinnacle fallback or
+  binaries. Schedule context still cannot create slate games or change probabilities.
+- **Pinnacle straight markets:** HTTP 204 on the fixed straight-market route is a
+  valid empty collection, cached for the usual 45 seconds and shown as **empty**
+  rather than an access/schema error. It produces no prices and replaces expired
+  quote caches. HTTP 403/404/429/500 remain failures; no alternate route is tried.
+  The 204 status survives cache reuse/restart.
+- **NBA LeagueDashLineups:** requests now include all default/empty filters in the
+  maintained [nba_api endpoint contract](https://github.com/swar/nba_api/blob/master/src/nba_api/stats/endpoints/leaguedashlineups.py),
+  including Month, OpponentTeamID, PaceAdjust, Period, PlusMinus and Rank. Failures
+  back off for at least six hours, persisted across restart. Existing successful
+  season-context cache freshness limits remain unchanged. A server error is still
+  reported honestly; this is not a verified remedy for NBA.com's live HTTP 500.
+- The injury-report import requirement and absence of a reliable bundled free
+  player-prop price feed remain informational limitations, not fabricated data.
+
+Native fixture tests cover the full refresh source card, no-content caching,
+expired-price replacement, access failures, lineup request parameters and persistent
+six-hour backoff. Live NBA/Pinnacle availability remains unverified in this sandbox.

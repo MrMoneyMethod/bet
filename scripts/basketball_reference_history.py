@@ -836,7 +836,24 @@ ESPN_TEAM_ALIASES = {"GS": "GSW", "NY": "NYK", "SA": "SAS", "NO": "NOP", "UTAH":
 
 
 def _hoopr_team(value: str) -> str:
-    return canonical_team(ESPN_TEAM_ALIASES.get(str(value).strip().upper(), str(value).strip().upper()))
+    value = str(value).strip().upper()
+    return "" if value in ("", "NA", "NULL") else canonical_team(ESPN_TEAM_ALIASES.get(value, value))
+
+
+def _hoopr_minutes(raw: str) -> float:
+    try:
+        parts = str(raw).strip().split(":")
+        minutes = float(parts[0])
+        if len(parts) == 2:
+            seconds = float(parts[1])
+            if not minutes.is_integer() or not math.isfinite(seconds) or not 0 <= seconds < 60:
+                return 0.0
+            minutes += seconds / 60
+        elif len(parts) != 1:
+            return 0.0
+        return minutes if math.isfinite(minutes) and minutes >= 0 else 0.0
+    except ValueError:
+        return 0.0
 
 
 def ingest_hoopr(archive: Archive, args) -> None:
@@ -844,6 +861,16 @@ def ingest_hoopr(archive: Archive, args) -> None:
         raise ParseError("Provide at least one --player-box-csv file from the espn_nba_player_boxscores release")
     games: dict[str, dict] = {}
     order: list[str] = []
+
+    def set_team(game, side, raw):
+        team = _hoopr_team(raw)
+        if not team:
+            return
+        if game[side] and game[side] != team:
+            game["metadataError"] = "Conflicting home/away team metadata"
+        else:
+            game[side] = team
+
     for path in args.player_box_csv:
         with open(path, newline="", encoding="utf-8-sig") as handle:
             reader = csv.DictReader(handle)
@@ -865,8 +892,9 @@ def ingest_hoopr(archive: Archive, args) -> None:
                     "dnp": resolve(["did_not_play"], "did-not-play flag", False),
                     "minutes": resolve(["minutes", "min"], "minutes"),
                     "date": resolve(["game_date", "date"], "game date", False),
-                    "home": resolve(["home_team_abbreviation", "home_team_abbr"], "home team", False),
-                    "away": resolve(["away_team_abbreviation", "away_team_abbr"], "away team", False),
+                    "home": resolve(["home_team_abbreviation", "home_team_abbr", "home_team_abbrev"], "home team", False),
+                    "away": resolve(["away_team_abbreviation", "away_team_abbr", "away_team_abbrev"], "away team", False),
+                    "role": resolve(["home_away", "team_home_away"], "home/away role", False),
                     "season_type": resolve(["season_type"], "season type", False)}
             stat_cols = {field_name: resolve(aliases, field_name, False) for field_name, aliases in HOOPR_BOX_FIELDS.items()}
             stat_cols = {k: v for k, v in stat_cols.items() if v}
@@ -884,19 +912,18 @@ def ingest_hoopr(archive: Archive, args) -> None:
                     order.append(game_id)
                 if cols["date"] and not game["date"]:
                     game["date"] = str(row[cols["date"]]).strip()[:10]
-                if cols["home"] and not game["home"]:
-                    game["home"] = _hoopr_team(row[cols["home"]])
-                if cols["away"] and not game["away"]:
-                    game["away"] = _hoopr_team(row[cols["away"]])
+                if cols["home"]:
+                    set_team(game, "home", row[cols["home"]])
+                if cols["away"]:
+                    set_team(game, "away", row[cols["away"]])
                 if cols["season_type"]:
                     game["seasonType"] = "playoffs" if str(row[cols["season_type"]]).strip() in ("3", "playoffs") else "regular"
                 team = _hoopr_team(row[cols["team"]])
+                role = str(row.get(cols["role"], "")).strip().lower()
+                if role in ("home", "away"):
+                    set_team(game, role, team)
                 starter = _truthy(row[cols["starter"]])
-                minutes_raw = str(row[cols["minutes"]]).strip()
-                try:
-                    minutes_value = float(minutes_raw or 0)
-                except ValueError:
-                    minutes_value = 0.0
+                minutes_value = _hoopr_minutes(row[cols["minutes"]])
                 if (cols["dnp"] and _truthy(row[cols["dnp"]])) or (minutes_value <= 0 and not starter):
                     continue
                 if starter and minutes_value <= 0:
@@ -934,17 +961,17 @@ def ingest_hoopr(archive: Archive, args) -> None:
                     "away_score": resolve(["away_score"], "away score", False),
                     "home_score": resolve(["home_score"], "home score", False),
                     "athlete": resolve(["athlete_id_1"], "primary athlete", False),
-                    "home": resolve(["home_team_abbreviation", "home_team_abbr"], "home team", False),
-                    "away": resolve(["away_team_abbreviation", "away_team_abbr"], "away team", False)}
+                    "home": resolve(["home_team_abbreviation", "home_team_abbr", "home_team_abbrev"], "home team", False),
+                    "away": resolve(["away_team_abbreviation", "away_team_abbr", "away_team_abbrev"], "away team", False)}
             for row in reader:
                 game_id = str(row[cols["game"]]).strip()
                 game = games.get(game_id)
                 if game is None:
                     continue
-                if cols["home"] and not game["home"]:
-                    game["home"] = _hoopr_team(row[cols["home"]])
-                if cols["away"] and not game["away"]:
-                    game["away"] = _hoopr_team(row[cols["away"]])
+                if cols["home"]:
+                    set_team(game, "home", row[cols["home"]])
+                if cols["away"]:
+                    set_team(game, "away", row[cols["away"]])
                 try:
                     period = int(float(str(row[cols["period"]]).strip() or 1))
                 except ValueError:
@@ -971,6 +998,8 @@ def ingest_hoopr(archive: Archive, args) -> None:
     for game_id in order:
         game = games[game_id]
         try:
+            if game.get("metadataError"):
+                raise ParseError(game["metadataError"])
             teams = {p["team"] for p in game["players"]}
             if len(teams) != 2 or not game["date"] or not game["home"] or not game["away"]:
                 raise ParseError("Missing date or home/away teams; provide schedule columns in the CSVs")

@@ -267,12 +267,18 @@ void add_odds(const json &odds, json &snapshot, const json &game, const std::str
         }
     }
 }
+bool pinnacle_no_markets(const std::string &url, int status) {
+    const std::string suffix = "/markets/straight?brandId=0";
+    return status == 204 && url.rfind("https://guest.api.arcadia.pinnacle.com/0.1/leagues/", 0) == 0 &&
+           url.size() >= suffix.size() && url.compare(url.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
 json source(const std::string &id, const std::string &name, const FeedResponse &response, int count,
             const std::string &detail) {
     return {{"id", id},
             {"label", name},
             {"state", response.data.is_null() ? "unavailable"
                       : response.stale        ? "stale"
+                      : response.status == 204 ? "empty"
                       : response.cached       ? "cached"
                                               : "ok"},
             {"updatedAt", response.fetched_at},
@@ -280,7 +286,7 @@ json source(const std::string &id, const std::string &name, const FeedResponse &
             {"message",
              response.data.is_null()
                  ? response.error
-                 : detail + (response.stale ? " Cached data is older than the normal refresh TTL." : "")}};
+                 : detail + (response.status == 204 ? " HTTP 204: no current straight markets were published; no prices were inferred." : "") + (response.stale ? " Cached data is older than the normal refresh TTL." : "")}};
 }
 std::string strip_tags(const std::string &html) {
     std::string value = std::regex_replace(html, std::regex("<[^>]*>"), "");
@@ -642,7 +648,7 @@ HttpResponse public_get(const std::string &url) {
         response.error = "HTTPS source unavailable (curl exit " +
                          std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1) + ")";
 #endif
-    if (response.status != 200 && response.error.empty())
+    if (response.status != 200 && !pinnacle_no_markets(url, response.status) && response.error.empty())
         response.error = "Public source returned HTTP " + std::to_string(response.status) +
                          "; no challenge, login or rate-limit bypass attempted";
     return response;
@@ -2063,92 +2069,121 @@ void parse_official_schedule(const json &doc, json &s, const std::string &fetche
     // NBA.com CDN scheduleLeagueV2 (same leagueSchedule envelope the NBA Stats
     // scheduleleaguev2 endpoint returns). One request covers the full season;
     // only games already in the snapshot window are enriched, so a 1,200-game
-    // file never floods the dashboard.
-    if (!doc.contains("leagueSchedule") || !doc["leagueSchedule"].is_object())
+    // file never floods the dashboard. The CDN schema contains explicit nulls
+    // for optional metadata; those fields must not abort the whole source.
+    if (!doc.is_object() || !doc.contains("leagueSchedule") || !doc["leagueSchedule"].is_object())
         return;
     const auto &league = doc["leagueSchedule"];
     auto broadcast_names = [](const json &list) {
         json out = json::array();
-        if (list.is_array())
-            for (const auto &entry : list) {
-                auto name = entry.value("broadcasterDisplay", "");
-                if (!name.empty())
-                    out.push_back(name);
-            }
+        if (!list.is_array())
+            return out;
+        for (const auto &entry : list) {
+            const auto name = string_field(entry, "broadcasterDisplay");
+            if (!name.empty())
+                out.push_back(name);
+        }
         return out;
     };
     int games = 0, matched = 0;
-    for (const auto &date_group : league.value("gameDates", json::array())) {
-        for (const auto &raw : date_group.value("games", json::array())) {
-            if (!raw.contains("homeTeam") || !raw.contains("awayTeam"))
+    const auto game_dates = league.value("gameDates", json::array());
+    if (game_dates.is_array()) {
+        for (const auto &date_group : game_dates) {
+            if (!date_group.is_object())
                 continue;
-            ++games;
-            const auto home = canonical_team(raw["homeTeam"].value("teamTricode", "")),
-                       away = canonical_team(raw["awayTeam"].value("teamTricode", ""));
-            const auto starts = clean_timestamp(raw.value("gameDateTimeUTC", ""));
-            const auto official_id = text(raw.value("gameId", json("")));
-            if (home.empty() || away.empty() || official_id.empty() || !parse_time(starts))
+            const auto date_games = date_group.value("games", json::array());
+            if (!date_games.is_array())
                 continue;
-            json *best = nullptr;
-            long long best_diff = 0;
-            for (auto &game : s["games"]) {
-                if (game.value("nbaId", "") == official_id || game.value("officialGameId", "") == official_id) {
-                    best = &game;
-                    best_diff = 0;
-                    break;
-                }
-                if (game.value("home", "") != home || game.value("away", "") != away)
+            for (const auto &raw : date_games) {
+                if (!raw.is_object())
                     continue;
-                const long long diff = std::llabs(parse_time(game.value("startsAt", "")) - parse_time(starts));
-                if (diff <= 36 * 3600 && (!best || diff < best_diff)) {
-                    best = &game;
-                    best_diff = diff;
+                const auto home_it = raw.find("homeTeam");
+                const auto away_it = raw.find("awayTeam");
+                if (home_it == raw.end() || away_it == raw.end() || !home_it->is_object() ||
+                    !away_it->is_object())
+                    continue;
+                ++games;
+                const auto home = canonical_team(string_field(*home_it, "teamTricode"));
+                const auto away = canonical_team(string_field(*away_it, "teamTricode"));
+                const auto starts = clean_timestamp(string_field(raw, "gameDateTimeUTC"));
+                const auto official_id = text(raw.value("gameId", json("")));
+                if (home.empty() || away.empty() || official_id.empty() || !parse_time(starts))
+                    continue;
+                json *best = nullptr;
+                long long best_diff = 0;
+                for (auto &game : s["games"]) {
+                    if (!official_id.empty() &&
+                        (string_field(game, "nbaId") == official_id ||
+                         string_field(game, "officialGameId") == official_id)) {
+                        best = &game;
+                        best_diff = 0;
+                        break;
+                    }
+                    if (string_field(game, "home") != home || string_field(game, "away") != away)
+                        continue;
+                    const long long diff =
+                        std::llabs(parse_time(string_field(game, "startsAt")) - parse_time(starts));
+                    if (diff <= 36 * 3600 && (!best || diff < best_diff)) {
+                        best = &game;
+                        best_diff = diff;
+                    }
                 }
+                if (!best)
+                    continue;
+                ++matched;
+                auto &game = *best;
+                const auto arena_name = string_field(raw, "arenaName");
+                game["officialGameId"] = official_id;
+                game["gameCode"] = string_field(raw, "gameCode");
+                game["officialStatus"] = number(raw.value("gameStatus", json(0)));
+                game["officialStatusText"] = string_field(raw, "gameStatusText");
+                game["arenaName"] = arena_name;
+                game["arenaCity"] = string_field(raw, "arenaCity");
+                game["arenaState"] = string_field(raw, "arenaState");
+                if (string_field(game, "venue").empty() && !arena_name.empty())
+                    game["venue"] = arena_name;
+                const auto neutral = raw.value("isNeutral", json());
+                game["neutralSite"] = neutral.is_boolean() && neutral.get<bool>();
+                game["postponedStatus"] = string_field(raw, "postponedStatus");
+                game["seriesText"] = string_field(raw, "seriesText");
+                game["gameLabel"] = string_field(raw, "gameLabel");
+                game["gameSubLabel"] = string_field(raw, "gameSubLabel");
+                const auto casters = raw.value("broadcasters", json::object());
+                const json empty_casters = json::object();
+                const auto &safe_casters = casters.is_object() ? casters : empty_casters;
+                game["broadcasts"] = {
+                    {"national", broadcast_names(safe_casters.value("nationalBroadcasters", json::array()))},
+                    {"nationalRadio", broadcast_names(safe_casters.value("nationalRadioBroadcasters", json::array()))},
+                    {"nationalOtt", broadcast_names(safe_casters.value("nationalOttBroadcasters", json::array()))},
+                    {"homeTv", broadcast_names(safe_casters.value("homeTvBroadcasters", json::array()))},
+                    {"homeRadio", broadcast_names(safe_casters.value("homeRadioBroadcasters", json::array()))},
+                    {"awayTv", broadcast_names(safe_casters.value("awayTvBroadcasters", json::array()))},
+                    {"awayRadio", broadcast_names(safe_casters.value("awayRadioBroadcasters", json::array()))}};
+                json leaders = json::array();
+                const auto points_leaders = raw.value("pointsLeaders", json::array());
+                if (points_leaders.is_array()) {
+                    for (const auto &leader : points_leaders) {
+                        if (!leader.is_object())
+                            continue;
+                        auto name = string_field(leader, "firstName") + " " + string_field(leader, "lastName");
+                        while (!name.empty() && name.front() == ' ')
+                            name.erase(name.begin());
+                        while (!name.empty() && name.back() == ' ')
+                            name.pop_back();
+                        leaders.push_back({{"name", name},
+                                           {"team", string_field(leader, "teamTricode")},
+                                           {"points", number(leader.value("points", json(0)))}});
+                    }
+                }
+                game["pointsLeaders"] = leaders;
             }
-            if (!best)
-                continue;
-            ++matched;
-            auto &game = *best;
-            game["officialGameId"] = official_id;
-            game["gameCode"] = raw.value("gameCode", "");
-            game["officialStatus"] = number(raw.value("gameStatus", json(0)));
-            game["officialStatusText"] = raw.value("gameStatusText", "");
-            game["arenaName"] = raw.value("arenaName", "");
-            game["arenaCity"] = raw.value("arenaCity", "");
-            game["arenaState"] = raw.value("arenaState", "");
-            if (game.value("venue", "").empty() && !raw.value("arenaName", "").empty())
-                game["venue"] = raw.value("arenaName", "");
-            game["neutralSite"] = raw.value("isNeutral", false);
-            game["postponedStatus"] = raw.value("postponedStatus", "");
-            game["seriesText"] = raw.value("seriesText", "");
-            game["gameLabel"] = raw.value("gameLabel", "");
-            game["gameSubLabel"] = raw.value("gameSubLabel", "");
-            const auto &casters = raw.value("broadcasters", json::object());
-            game["broadcasts"] = {{"national", broadcast_names(casters.value("nationalBroadcasters", json::array()))},
-                                  {"nationalRadio", broadcast_names(casters.value("nationalRadioBroadcasters", json::array()))},
-                                  {"nationalOtt", broadcast_names(casters.value("nationalOttBroadcasters", json::array()))},
-                                  {"homeTv", broadcast_names(casters.value("homeTvBroadcasters", json::array()))},
-                                  {"homeRadio", broadcast_names(casters.value("homeRadioBroadcasters", json::array()))},
-                                  {"awayTv", broadcast_names(casters.value("awayTvBroadcasters", json::array()))},
-                                  {"awayRadio", broadcast_names(casters.value("awayRadioBroadcasters", json::array()))}};
-            json leaders = json::array();
-            for (const auto &leader : raw.value("pointsLeaders", json::array())) {
-                auto name = leader.value("firstName", "") + std::string(" ") + leader.value("lastName", "");
-                while (!name.empty() && name.front() == ' ')
-                    name.erase(name.begin());
-                while (!name.empty() && name.back() == ' ')
-                    name.pop_back();
-                leaders.push_back({{"name", name},
-                                   {"team", leader.value("teamTricode", "")},
-                                   {"points", number(leader.value("points", json(0)))}});
-            }
-            game["pointsLeaders"] = leaders;
         }
     }
-    s["leagueContext"]["schedule"] = {{"seasonYear", league.value("seasonYear", "")},
-                                      {"leagueId", league.value("leagueId", "")},
+    const auto weeks = league.value("weeks", json::array());
+    s["leagueContext"]["schedule"] = {{"seasonYear", string_field(league, "seasonYear")},
+                                      {"leagueId", text(league.value("leagueId", json("")))},
                                       {"games", games},
-                                      {"weeks", league.value("weeks", json::array()).size()},
+                                      {"weeks", weeks.is_array() ? weeks.size() : 0},
                                       {"matchedGames", matched},
                                       {"asOf", fetched}};
 }
@@ -2834,6 +2869,7 @@ FeedResponse PublicFeeds::get(
         response.data = cache.value("body", json());
         response.fetched_at = cache.value("fetchedAt", "");
         response.cached = true;
+        response.status = cache.value("httpStatus", 200);
         return response;
     }
     auto use_stale_cache = [&] {
@@ -2892,15 +2928,17 @@ FeedResponse PublicFeeds::get(
         auto http = transport_(url);
         response.status = http.status;
         response.error = http.error;
-        if (http.status == 200 && http.error.empty()) {
+        const bool no_markets = pinnacle_no_markets(url, http.status);
+        if ((http.status == 200 || no_markets) && http.error.empty()) {
             try {
-                response.data = json::parse(http.body);
+                response.data = no_markets ? json::array() : json::parse(http.body);
                 if (!valid_feed_payload(url, response.data)) {
                     response.data = nullptr;
                     throw std::runtime_error("Unsupported provider contract");
                 }
                 response.fetched_at = now_iso();
-                json entry = {{"url", url}, {"fetchedAt", response.fetched_at}, {"body", response.data}};
+                json entry = {{"url", url}, {"fetchedAt", response.fetched_at}, {"body", response.data},
+                              {"httpStatus", response.status}};
                 write_json_file(path, entry);
                 std::error_code host_error;
                 std::filesystem::remove(host_path, host_error);
@@ -3922,10 +3960,17 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                                   player_tracking_defense, player_field_count("trackingDefense"),
                                   "Defended field-goal % versus the shooters' normal % (PCT_PLUSMINUS "
                                   "differential), overall category. Context only."));
+    // Match nba_api's complete LeagueDashLineups parameter contract, including
+    // zero/default filters: omitting them can produce a server-side HTTP 500.
     auto team_lineups = get("https://stats.nba.com/stats/leaguedashlineups?GroupQuantity=5&LastNGames=0&"
-                            "LeagueID=00&MeasureType=Base&PerMode=Totals&Season=" +
+                            "LeagueID=00&MeasureType=Base&PerMode=Totals&Month=0&OpponentTeamID=0&"
+                            "PaceAdjust=N&Period=0&PlusMinus=N&Rank=N&Conference=&DateFrom=&DateTo=&"
+                            "Division=&GameSegment=&Location=&Outcome=&PORound=&SeasonSegment=&"
+                            "ShotClockRange=&TeamID=&VsConference=&VsDivision=&Season=" +
                                 season + "&SeasonType=Regular%20Season",
-                            21600, 172800);
+                            21600, 172800, 21600);
+    if (team_lineups.data.is_null() && team_lineups.status >= 500)
+        team_lineups.error += " Season-lineup retries are deferred for at least six hours.";
     if (!team_lineups.data.is_null())
         parse_guard("nba-team-lineups",
                     [&] { parse_team_top_lineups(team_lineups.data, s, team_lineups.fetched_at); });

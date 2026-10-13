@@ -13,6 +13,21 @@ are compiled into the EXE or sent to the browser.
 The default server listens only on 127.0.0.1, preferably port 8741.
 If automatic browser launch fails, copy the printed local URL into a browser.
 
+HISTORY / PROVIDER HOTFIX (2026-10-13)
+--------------------------------------
+Close the old app before replacing Edgecourt.exe. Keep your existing data
+folder and cached downloads; do not delete them. Relaunch, open Model lab,
+and click Download/update to rebuild history with the corrected hoopR
+home/away column mapping. Existing CSVs are reused when still valid.
+The importer also understands MM:SS minutes and explains rejected games.
+
+Nullable NBA schedule fields no longer abort the schedule parser. Pinnacle
+HTTP 204 means no current straight markets (shown as empty, not an error).
+NBA season-lineup requests include the full default parameter set; failures
+back off for at least six hours. Upstream availability is not guaranteed.
+These fixes passed offline tests; this build has not been run on Windows
+in the development sandbox. See docs/VALIDATION.md for the exact checks.
+
 OPTIONAL PROVIDER CREDENTIALS
 -----------------------------
 Set variables in a PowerShell window before launching Edgecourt. These values
