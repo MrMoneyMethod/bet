@@ -47,7 +47,8 @@ App::App(std::filesystem::path dir, const std::string &initial_mode, std::filesy
          bool fetch_public)
     : data_dir_(std::move(dir)),
       history_dir_(history_dir.empty() ? data_dir_ / "history" : std::move(history_dir)),
-      feeds_(data_dir_ / "cache"), token_(session_token()), feeds_enabled_(fetch_public) {
+      feeds_(data_dir_ / "cache"), history_downloader_(history_dir_), token_(session_token()),
+      feeds_enabled_(fetch_public) {
     std::filesystem::create_directories(data_dir_);
     std::string mode = initial_mode;
     if (mode.empty())
@@ -87,9 +88,18 @@ App::App(std::filesystem::path dir, const std::string &initial_mode, std::filesy
         requested_ = feeds_enabled_;
         snapshot_["refreshing"] = requested_;
     }
+    history_downloader_.set_on_finished([this] {
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            history_dirty_ = true;
+        }
+        condition_.notify_all();
+    });
     rebuild_locked();
     routes();
     worker_ = std::thread(&App::worker_loop, this);
+    if (mode == "live")
+        maybe_start_history_download();
 }
 App::~App() {
     stop();
@@ -222,6 +232,8 @@ void App::change_mode(const std::string &mode) {
         requested_ = false;
     rebuild_locked();
     condition_.notify_one();
+    if (mode == "live")
+        maybe_start_history_download();
 }
 json App::import(const json &request) {
     const auto format = request.value("format", "json");
@@ -319,9 +331,24 @@ void App::worker_loop() {
             wait = elapsed >= std::chrono::seconds(60) ? std::chrono::seconds(1)
                                                        : std::chrono::seconds(60) - elapsed;
         }
-        condition_.wait_for(lock, wait, [this] { return stopping_ || requested_; });
+        condition_.wait_for(lock, wait, [this] { return stopping_ || requested_ || history_dirty_; });
         if (stopping_)
             break;
+        if (history_dirty_) {
+            history_dirty_ = false;
+            lock.unlock();
+            try {
+                reload_history();
+            } catch (const std::exception &error) {
+                std::lock_guard<std::mutex> guard(mutex_);
+                history_.status["state"] = "unavailable";
+                history_.status["message"] =
+                    std::string("Downloaded history was not loaded: ") + error.what();
+                rebuild_locked();
+            }
+            lock.lock();
+            continue;
+        }
         if (snapshot_.value("mode", "demo") != "live") {
             // Refresh only synthetic timestamps. Never re-stamp a user-imported price.
             for (auto &q : snapshot_["quotes"])
@@ -379,7 +406,31 @@ void App::worker_loop() {
         }
         snapshot_["refreshing"] = false;
         rebuild_locked();
+        maybe_start_history_download();
     }
+}
+void App::maybe_start_history_download() {
+    if (!feeds_enabled_ || snapshot_.value("mode", "demo") != "live")
+        return;
+    const auto state = history_.status.value("state", "");
+    if (state == "not_installed" || state == "empty")
+        history_downloader_.start();
+}
+json App::download_history() {
+    if (!feeds_enabled_)
+        return {{"ok", true},
+                {"started", false},
+                {"message", "Public feeds are disabled (--offline); history auto-download is off."}};
+    if (snapshot_.value("mode", "demo") != "live")
+        return {{"ok", true},
+                {"started", false},
+                {"message", "History auto-download runs in Live mode; Demo stays synthetic."}};
+    const bool started = history_downloader_.start(true);
+    return {{"ok", true},
+            {"started", started},
+            {"message", started ? "History download started in the background."
+                                : "A history download is already running."},
+            {"status", history_downloader_.status()}};
 }
 json App::reload_history() {
     // Validate the entire replacement off-lock; a bad file never changes the accepted bundle.
@@ -449,7 +500,23 @@ void App::routes() {
     });
     server_.Get("/api/state", [this](const httplib::Request &, httplib::Response &res) {
         std::lock_guard<std::mutex> guard(mutex_);
-        reply(res, expire_dashboard(dashboard_));
+        auto dashboard = expire_dashboard(dashboard_);
+        const auto download = history_downloader_.status();
+        const auto download_state = download.value("state", "idle");
+        if (download_state != "idle") {
+            auto merged = dashboard["historicalData"];
+            merged["download"] = download;
+            if (download_state == "downloading" || download_state == "building") {
+                merged["state"] = "downloading";
+                merged["message"] = download.value("message", "");
+            } else if (download_state == "failed" &&
+                       history_.status.value("state", "") != "local_history") {
+                merged["state"] = "download_failed";
+                merged["message"] = download.value("message", "");
+            }
+            dashboard["historicalData"] = merged;
+        }
+        reply(res, dashboard);
     });
     server_.Get("/api/template.csv", [this](const httplib::Request &, httplib::Response &res) {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -481,6 +548,12 @@ void App::routes() {
         } catch (const std::exception &error) {
             reply(res, {{"error", error.what()}}, 400);
         }
+    });
+    server_.Post("/api/history/download", [this](const httplib::Request &req, httplib::Response &res) {
+        if (!authorize(req, res))
+            return;
+        std::lock_guard<std::mutex> guard(mutex_);
+        reply(res, download_history());
     });
     server_.Post("/api/history/reload", [this](const httplib::Request &req, httplib::Response &res) {
         if (!authorize(req, res))

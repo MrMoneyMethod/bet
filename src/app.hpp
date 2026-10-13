@@ -2,6 +2,7 @@
 #include "core.hpp"
 #include "feeds.hpp"
 #include "history.hpp"
+#include "history_download.hpp"
 #include "httplib/httplib.h"
 #include <atomic>
 #include <chrono>
@@ -28,6 +29,8 @@ class App {
     void change_mode(const std::string &mode);
     json import(const json &request);
     json reload_history();
+    json download_history();
+    void maybe_start_history_download();
     void save(const std::string &name, const json &value);
     json load(const std::string &name);
     bool authorize(const httplib::Request &req, httplib::Response &res);
@@ -38,9 +41,10 @@ class App {
     std::mutex mutex_;
     std::condition_variable condition_;
     std::thread worker_;
+    HistoryDownloader history_downloader_;
     json snapshot_, base_snapshot_, dashboard_, imports_;
     std::string token_;
-    bool feeds_enabled_ = true, stopping_ = false, requested_ = false;
+    bool feeds_enabled_ = true, stopping_ = false, requested_ = false, history_dirty_ = false;
     // Start time of the most recent live refresh; the worker auto-refreshes
     // every 60 seconds measured from refresh start (see worker_loop).
     std::chrono::steady_clock::time_point last_refresh_start_{};

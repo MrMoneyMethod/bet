@@ -68,6 +68,11 @@ void parse_team_opponent_shots(const json &document, json &snapshot, const std::
 void parse_team_top_lineups(const json &document, json &snapshot, const std::string &fetched_at);
 std::string daily_lineup_date_token(long long epoch_seconds);
 void parse_polymarket_events(const json &document, json &snapshot, const std::string &fetched_at);
+// NBA.com CDN odds file (odds_todaysGames.json): Sportradar-sourced moneylines
+// from named sportsbooks, published by the league itself. "2way" markets only;
+// decimal odds are converted to American. This is a public league file, not a
+// scraped sportsbook page.
+void parse_nba_cdn_odds(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_kalshi_markets(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_pinnacle_markets(const json &matchups, const json &markets, json &snapshot,
                             const std::string &fetched_at);

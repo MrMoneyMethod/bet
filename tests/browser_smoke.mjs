@@ -39,6 +39,9 @@ try{
   assert.match(await page.locator('.markets-table thead').innerText(),/Odds %/i);
   for(const price of await page.locator('.price-value, .game-odds').allTextContents())assert.match(price,/^(?:\d+(?:\.\d+)?%|—)$/);
   assert.match(await page.locator('.research-selection').innerText(),/\d+\.\d+%/);
+  assert.equal(await page.locator('#sort-filter option').count(),7,'Market sort is always visible with expanded keys');
+  await page.locator('#sort-filter').selectOption('start');assert.equal(await page.locator('#market-rows tr').count(),8);
+  await page.locator('#sort-filter').selectOption('ev');
   await page.locator('[data-category="moneyline"]').click();assert.equal(await page.locator('#market-rows tr').count(),6);
   await page.locator('[data-category="points"]').click();await page.locator('#search-input').fill('Stephen Curry');assert.equal(await page.locator('#market-rows tr').count(),2);
   await page.locator('#ev-filter').click();assert.ok(await page.locator('#market-rows tr').count()<=2);
@@ -51,7 +54,7 @@ try{
   await page.locator('#remove-game-filter').click();
   await page.locator('[data-time="upcoming"]').click();assert.equal(await page.locator('.game-card').count(),2);await page.locator('[data-time="all"]').click();
   await page.locator('.primary-nav [data-view="lab"]').click();assert.equal(await page.locator('.catalog-item').count(),53);assert.ok((await page.locator('#lab-view').innerText()).includes('not established an edge'));assert.ok((await page.locator('#lab-view').innerText()).includes('Official league desk'));
-  assert.ok(await page.locator('.history-card').isVisible());assert.match(await page.locator('.history-card').innerText(),/full crawl has not been run/);
+  assert.ok(await page.locator('.history-card').isVisible());assert.ok(await page.locator('#history-download').isVisible(),'History auto-download control is present');assert.match(await page.locator('.history-card').innerText(),/full crawl has not been run/);
   await page.locator('#history-reload').click();await waitToast();
   await page.locator('.primary-nav [data-view="debug"]').click();assert.ok(await page.locator('#debug-view').isVisible());
   assert.notEqual(await page.locator('#debug-total-count').innerText(),'0','Popup toasts must be recorded in the debug log');

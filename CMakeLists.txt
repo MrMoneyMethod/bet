@@ -6,7 +6,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Threads REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
-add_library(edgecourt_core src/core.cpp src/feeds.cpp src/history.cpp)
+add_library(edgecourt_core src/core.cpp src/feeds.cpp src/history.cpp src/history_download.cpp)
 target_include_directories(edgecourt_core PUBLIC src vendor)
 target_link_libraries(edgecourt_core PUBLIC Threads::Threads)
 if(WIN32)

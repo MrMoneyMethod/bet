@@ -1,6 +1,7 @@
 #include "core.hpp"
 #include "feeds.hpp"
 #include "history.hpp"
+#include "history_download.hpp"
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -796,6 +797,119 @@ int main() {
         manifest["synthetic"] = true;
         write();
         throws([&] { load_history_bundle(directory); });
+    });
+    test("NBA CDN odds file converts named-book decimal moneylines", [&] {
+        auto s = demo;
+        for (auto &g : s["games"])
+            if (g.value("id", "") == "demo-2")
+                g["officialGameId"] = "0022600002";
+        auto doc = json::parse(
+            R"({"games":[{"gameId":"0022600002","homeTeamId":"1610612747","awayTeamId":"1610612744","markets":[{"name":"2way","odds_type_id":1,"books":[{"id":"sr:book:1","name":"FixtureKings","outcomes":[{"type":"home","odds":"1.91"},{"type":"away","odds":"1.91"}]},{"id":"sr:book:2","name":"BetFixture","outcomes":[{"type":"home","odds":"2.10"},{"type":"away","odds":"1.80"}]}]},{"name":"spread","odds_type_id":4,"books":[{"name":"FixtureKings","outcomes":[{"type":"home","odds":"1.91","spread":"-3.5"}]}]}]},{"gameId":"0022600999","homeTeamId":"1610612738","awayTeamId":"1610612752","markets":[{"name":"2way","books":[{"name":"FixtureKings","outcomes":[{"type":"home","odds":"1.50"},{"type":"away","odds":"2.60"}]}]}]}]})");
+        parse_nba_cdn_odds(doc, s, now_iso());
+        int count = 0;
+        bool saw_plus_110 = false, saw_minus_125 = false, saw_books = false;
+        for (const auto &q : s["quotes"]) {
+            if (q.value("source", "") != "nba_cdn_odds")
+                continue;
+            ++count;
+            if (q.value("americanOdds", json()).is_number() && q["americanOdds"] == 110)
+                saw_plus_110 = true;
+            if (q.value("americanOdds", json()).is_number() && q["americanOdds"] == -125)
+                saw_minus_125 = true;
+            if (q.value("book", "") == "BetFixture")
+                saw_books = true;
+        }
+        check(count == 6, "Four moneylines for the matched game plus two via team ids; spread ignored");
+        check(saw_plus_110 && saw_minus_125, "Decimal odds converted to American (2.10 -> +110, 1.80 -> -125)");
+        check(saw_books, "Sportsbook names are preserved for book filtering");
+    });
+    test("History loader accepts SportsDataverse-stamped manifests", [&] {
+        const auto directory = std::filesystem::temp_directory_path() / "edgecourt-sdv-manifest-test";
+        std::filesystem::create_directories(directory);
+        struct Cleanup {
+            std::filesystem::path directory;
+            ~Cleanup() { std::filesystem::remove_all(directory); }
+        } cleanup{directory};
+        const auto date = iso_at(parse_time(now_iso()) - 86400).substr(0, 10);
+        auto p = demo["players"][normalize_name("Stephen Curry")];
+        p["dataAsOf"] = date + "T23:59:59Z";
+        json manifest = {{"recordType", "manifest"},
+                         {"source", "sportsdataverse hoopR ESPN play-by-play + player box scores (local CSV ingest)"},
+                         {"schemaVersion", 1},
+                         {"metadata",
+                          {{"games", 1},
+                           {"events", 20},
+                           {"missingGames", 0},
+                           {"firstDate", date},
+                           {"lastDate", date},
+                           {"asOf", now_iso().substr(0, 10)},
+                           {"exportedAt", now_iso()}}}};
+        std::ofstream file(directory / "features.jsonl");
+        file << manifest.dump() << "\n"
+             << json{{"recordType", "player"}, {"feature", p}}.dump() << "\n";
+        file.close();
+        auto history = load_history_bundle(directory);
+        check(history.status["historySource"] == "sportsdataverse", "Provenance tag propagated");
+        check(history.features["players"][normalize_name("Stephen Curry")]["historySource"] ==
+                  "sportsdataverse",
+              "Player records carry the SportsDataverse tag");
+    });
+    test("Native SportsDataverse builder emits a loadable bundle with first-FG history", [] {
+        const auto directory = std::filesystem::temp_directory_path() / "edgecourt-sdv-builder-test";
+        std::filesystem::create_directories(directory / "downloads");
+        struct Cleanup {
+            std::filesystem::path directory;
+            ~Cleanup() { std::filesystem::remove_all(directory); }
+        } cleanup{directory};
+        const std::string box_header =
+            "game_id,athlete_id,athlete_display_name,team_abbreviation,starter,did_not_play,minutes,points,"
+            "field_goals_made,field_goals_attempted,three_point_field_goals_made,"
+            "three_point_field_goals_attempted,free_throws_made,free_throws_attempted,offensive_rebounds,"
+            "total_rebounds,assists,steals,blocks,turnovers,personal_fouls,game_date,home_team_abbreviation,"
+            "away_team_abbreviation,season_type\n";
+        const std::string pbp_header =
+            "game_id,text,type_text,period_number,clock_display_value,scoring_play,score_value,away_score,"
+            "home_score,athlete_id_1\n";
+        auto game_rows = [](const std::string &game_id, const std::string &date) {
+            std::string box, pbp;
+            for (int side = 0; side < 2; ++side) {
+                const std::string team = side == 0 ? "LAL" : "GSW", prefix = side == 0 ? "Laker" : "Warrior";
+                const int base = side == 0 ? 100 : 200;
+                for (int i = 1; i <= 5; ++i) {
+                    box += game_id + "," + std::to_string(base + i) + "," + prefix + " " + std::to_string(i) + "," +
+                           team + ",true,false,30," + std::to_string(8 + i) + ",4,8,1,3,2,2,1,6,5,1,1,2,3," + date +
+                           ",LAL,GSW,2\n";
+                }
+            }
+            return std::pair<std::string, std::string>(box, pbp);
+        };
+        std::string box = box_header, pbp = pbp_header;
+        auto g1 = game_rows("401000001", "2024-01-05");
+        auto g2 = game_rows("401000002", "2024-01-06");
+        box += g1.first + g2.first;
+        // Game 1: a made free throw first (must not count), then Laker 1 scores the first field goal.
+        pbp += "401000001,\"Laker 1 makes free throw\",Free Throw,1,11:32,true,1,0,1,101\n";
+        pbp += "401000001,\"Laker 1 makes 2-pt jump shot, assisted by Laker 2\",Jump Shot,1,11:10,true,2,0,3,101\n";
+        // Game 2: Warrior 1 scores the first field goal.
+        pbp += "401000002,\"Warrior 1 makes 2-pt dunk\",Dunk,1,11:45,true,2,2,0,201\n";
+        pbp += "401000002,\"Laker 1 makes 3-pt jump shot\",Jump Shot,1,11:20,true,3,2,3,101\n";
+        {
+            std::ofstream(directory / "downloads" / "player_box_2024.csv") << box;
+            std::ofstream(directory / "downloads" / "play_by_play_2024.csv") << pbp;
+        }
+        const auto metadata = build_history_bundle(directory, {2024}, "2024-02-01");
+        check(metadata["games"] == 2 && metadata["missingGames"] == 0, "Both fixture games completed");
+        auto bundle = load_history_bundle(directory);
+        check(bundle.status["state"] == "local_history" && bundle.status["historySource"] == "sportsdataverse",
+              "Native bundle loads with SportsDataverse provenance");
+        const auto &laker = bundle.features["players"][normalize_name("Laker 1")];
+        check(laker["logs"].size() == 2, "Player logs exported for both games");
+        check(laker["firstBasketHistory"].size() == 2 && laker["firstBasketHistory"][0]["win"] == false &&
+                  laker["firstBasketHistory"][1]["win"] == true,
+              "First-FG opportunities are dated, newest-first, free throw ignored");
+        const auto &warrior = bundle.features["players"][normalize_name("Warrior 1")];
+        check(warrior["firstBasketHistory"].size() == 2 && warrior["firstBasketHistory"][0]["win"] == true,
+              "Away scorer credited in game 2");
     });
     test("Polymarket game moneylines become percentage quotes; futures/spreads ignored", [&] {
         auto s = empty_snapshot("live");

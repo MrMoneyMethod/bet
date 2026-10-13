@@ -1102,6 +1102,74 @@ void parse_pinnacle_markets(const json &matchups, const json &markets, json &s, 
         }
     }
 }
+void parse_nba_cdn_odds(const json &doc, json &s, const std::string &fetched) {
+    // https://cdn.nba.com/static/json/liveData/odds/odds_todaysGames.json
+    // (schema documented by swar/nba_api live Odds). Games carry the official
+    // NBA game id; markets named "2way" are moneylines with decimal odds.
+    static const std::map<std::string, std::string> kTeamIds = {
+        {"1610612737", "ATL"}, {"1610612738", "BOS"}, {"1610612739", "CLE"}, {"1610612740", "NOP"},
+        {"1610612741", "CHI"}, {"1610612742", "DAL"}, {"1610612743", "DEN"}, {"1610612744", "GSW"},
+        {"1610612745", "HOU"}, {"1610612746", "LAC"}, {"1610612747", "LAL"}, {"1610612748", "MIA"},
+        {"1610612749", "MIL"}, {"1610612750", "MIN"}, {"1610612751", "BKN"}, {"1610612752", "NYK"},
+        {"1610612753", "ORL"}, {"1610612754", "IND"}, {"1610612755", "PHI"}, {"1610612756", "PHX"},
+        {"1610612757", "POR"}, {"1610612758", "SAC"}, {"1610612759", "SAS"}, {"1610612760", "OKC"},
+        {"1610612761", "TOR"}, {"1610612762", "UTA"}, {"1610612763", "MEM"}, {"1610612764", "WAS"},
+        {"1610612765", "DET"}, {"1610612766", "CHA"}};
+    auto american_from_decimal = [](double decimal) -> int {
+        if (decimal >= 2)
+            return static_cast<int>(std::llround((decimal - 1) * 100));
+        return static_cast<int>(std::llround(-100 / (decimal - 1)));
+    };
+    for (const auto &raw_game : array_field(doc.value("games", json()))) {
+        if (!raw_game.is_object())
+            continue;
+        const auto official_id = text(raw_game.value("gameId", json("")));
+        const json *game = nullptr;
+        for (const auto &candidate : s["games"])
+            if (!official_id.empty() && (candidate.value("nbaId", "") == official_id ||
+                                         candidate.value("officialGameId", "") == official_id)) {
+                game = &candidate;
+                break;
+            }
+        if (!game) {
+            const auto home_it = kTeamIds.find(text(raw_game.value("homeTeamId", json("")))),
+                       away_it = kTeamIds.find(text(raw_game.value("awayTeamId", json(""))));
+            if (home_it != kTeamIds.end() && away_it != kTeamIds.end())
+                game = find_game(s, home_it->second, away_it->second);
+        }
+        if (!game)
+            continue;
+        int books_used = 0;
+        for (const auto &market : array_field(raw_game.value("markets", json()))) {
+            if (market.value("name", "") != "2way")
+                continue;
+            for (const auto &book : array_field(market.value("books", json()))) {
+                if (books_used >= 10)
+                    break;
+                const auto book_name = book.value("name", "");
+                if (book_name.empty())
+                    continue;
+                bool used = false;
+                for (const auto &outcome : array_field(book.value("outcomes", json()))) {
+                    const auto type = outcome.value("type", "");
+                    if (type != "home" && type != "away")
+                        continue;
+                    const double decimal = number(outcome.value("odds", json()), 0);
+                    if (decimal <= 1.01 || decimal > 1000)
+                        continue;
+                    auto q = external_moneyline(*game, game->value(type, ""), type, book_name, "nba_cdn_odds",
+                                                fetched,
+                                                "https://cdn.nba.com/static/json/liveData/odds/odds_todaysGames.json");
+                    q["americanOdds"] = american_from_decimal(decimal);
+                    add_external_quote(s, q);
+                    used = true;
+                }
+                if (used)
+                    ++books_used;
+            }
+        }
+    }
+}
 void parse_standings(const json &doc, json &s, const std::string &fetched) {
     // nba_api LeagueStandingsV3: one row per team, no abbreviation column, so
     // TeamCity + TeamName are mapped through the full-name table.
@@ -2094,6 +2162,21 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     s["sources"].push_back(
         source("nba-live", "NBA live scoreboard", nba, static_cast<int>(s["games"].size()),
                "Scores, period and game clock. NBA CDN is keyless; availability is not guaranteed."));
+    // The league's own odds file: named sportsbook moneylines (Sportradar
+    // sourced) for today's games. Public league data — no sportsbook page is
+    // scraped. Converted to American prices; spread markets are ignored.
+    auto nba_odds = get("https://cdn.nba.com/static/json/liveData/odds/odds_todaysGames.json", 120, 0);
+    int nba_odds_count = 0;
+    if (!nba_odds.data.is_null()) {
+        const auto before = s["quotes"].size();
+        parse_nba_cdn_odds(nba_odds.data, s, nba_odds.fetched_at);
+        nba_odds_count = static_cast<int>(s["quotes"].size() - before);
+    }
+    s["sources"].push_back(source(
+        "nba-odds", "NBA CDN sportsbook moneylines", nba_odds, nba_odds_count,
+        "Moneylines from named sportsbooks published in the NBA's own public odds file "
+        "(odds_todaysGames.json, Sportradar-sourced, decimal prices converted to American). "
+        "Indicative prices; the file carries no book timestamps, so retrieval time is used."));
     // Keyless traded/sharp moneyline prices run before stats/roster enrichment so
     // the shared request budget cannot starve them. Only quotes matching an already
     // scheduled game (preseason included) are kept; these venues publish

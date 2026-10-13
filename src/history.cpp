@@ -12,11 +12,11 @@ void bounded_count(const json &metadata, const char *key, long long limit) {
         metadata[key].get<long long>() > limit)
         throw std::invalid_argument(std::string("Invalid history manifest count: ") + key);
 }
-json merge_logs(const json &historical, const json &current) {
+json merge_logs(const json &historical, const json &current, const std::string &source_tag) {
     std::map<std::string, json, std::greater<std::string>> dates;
     for (const auto &log : historical) {
         auto tagged = log;
-        tagged["historySource"] = "basketball_reference";
+        tagged["historySource"] = source_tag;
         dates[log.value("date", "")] = std::move(tagged);
     }
     // Official/current imported observations win on overlap; a reload replaces old archive observations.
@@ -54,8 +54,10 @@ HistoryBundle load_history_bundle(const std::filesystem::path &directory) {
             throw std::invalid_argument("Historical records must be JSON objects");
         const auto kind = record.value("recordType", "");
         if (line_number == 1) {
+            const auto source_name = record.value("source", "");
             if (kind != "manifest" || record.value("schemaVersion", 0) != 1 ||
-                record.value("source", "") != "basketball_reference" || record.value("synthetic", false))
+                (source_name != "basketball_reference" && source_name.rfind("sportsdataverse", 0) != 0) ||
+                record.value("synthetic", false))
                 throw std::invalid_argument("Unsupported or synthetic history manifest");
             const auto metadata = record.at("metadata");
             bounded_count(metadata, "games", 200000);
@@ -75,6 +77,9 @@ HistoryBundle load_history_bundle(const std::filesystem::path &directory) {
             if (metadata.value("firstDate", "") > metadata.value("lastDate", ""))
                 throw std::invalid_argument("History date range is reversed");
             bundle.status = metadata;
+            bundle.status["source"] = source_name;
+            bundle.status["historySource"] =
+                source_name == "basketball_reference" ? "basketball_reference" : "sportsdataverse";
             bundle.status["state"] = number(metadata["games"]) > 0 ? "local_history" : "empty";
             bundle.status["message"] =
                 "Local, user-supplied archive features; source accuracy and completeness "
@@ -90,7 +95,7 @@ HistoryBundle load_history_bundle(const std::filesystem::path &directory) {
         if (bundle.features[category].contains(key))
             throw std::invalid_argument("Duplicate historical feature identity");
         auto value = validated[category].at(key);
-        value["historySource"] = "basketball_reference";
+        value["historySource"] = bundle.status.value("historySource", "basketball_reference");
         if (kind == "player") {
             value["starterConfirmed"] = false;
             value["injury"] = "Unknown";
@@ -139,13 +144,14 @@ void apply_history(json &snapshot, const HistoryBundle &history) {
     // Synthetic mode must never be represented as historical/provider observations.
     if (snapshot.value("mode", "demo") != "live")
         return;
+    const auto source_tag = history.status.value("historySource", "basketball_reference");
     for (const auto &entry : history.features["players"].items()) {
         auto current = snapshot["players"].value(entry.key(), json::object());
         auto combined = entry.value();
         if (!current.empty()) {
             combined = current;
             // Preserve roster team, injuries, current-game starters and actual live stats.
-            combined["logs"] = merge_logs(entry.value()["logs"], current.value("logs", json::array()));
+            combined["logs"] = merge_logs(entry.value()["logs"], current.value("logs", json::array()), source_tag);
             if (entry.value().contains("firstBasketHistory")) {
                 combined["firstBasketHistory"] = entry.value()["firstBasketHistory"];
                 combined.erase("firstBasketGames");
@@ -154,11 +160,11 @@ void apply_history(json &snapshot, const HistoryBundle &history) {
             if (entry.value().contains("historicalPace") && !current.contains("historicalPace"))
                 combined["historicalPace"] = entry.value()["historicalPace"];
         } else {
-            combined["logs"] = merge_logs(entry.value()["logs"], json::array());
+            combined["logs"] = merge_logs(entry.value()["logs"], json::array(), source_tag);
             combined["starterConfirmed"] = false;
             combined.erase("starterGameId");
         }
-        combined["historySource"] = "basketball_reference";
+        combined["historySource"] = source_tag;
         snapshot["players"][entry.key()] = std::move(combined);
     }
     for (const auto &entry : history.features["teams"].items()) {
@@ -167,14 +173,14 @@ void apply_history(json &snapshot, const HistoryBundle &history) {
         if (!current.empty()) {
             for (const auto &field : current.items())
                 combined[field.key()] = field.value();
-            combined["logs"] = merge_logs(entry.value()["logs"], current.value("logs", json::array()));
+            combined["logs"] = merge_logs(entry.value()["logs"], current.value("logs", json::array()), source_tag);
             // Partial public team identities must not stamp archive-derived ratings fresh.
             if (!current.contains("pace") || !current.contains("offRating") || !current.contains("defRating"))
                 combined["dataAsOf"] = entry.value()["dataAsOf"];
         } else {
-            combined["logs"] = merge_logs(entry.value()["logs"], json::array());
+            combined["logs"] = merge_logs(entry.value()["logs"], json::array(), source_tag);
         }
-        combined["historySource"] = "basketball_reference";
+        combined["historySource"] = source_tag;
         snapshot["teams"][entry.key()] = std::move(combined);
     }
 }
