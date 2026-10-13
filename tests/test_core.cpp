@@ -1299,6 +1299,37 @@ int main() {
                 carried = true;
         check(carried, "Dashboard carries compact team league context");
     });
+    test("NBA CDN odds parser skips null-named books and null outcome fields", [&] {
+        // Real Sportradar payloads carry explicit nulls; value(key, "") used to
+        // throw type_error.302 on them and abort the whole refresh.
+        auto s = empty_snapshot("live");
+        const auto start = iso_at(parse_time(now_iso()) + 3600);
+        s["games"].push_back({{"id", "g9"}, {"home", "LAL"}, {"away", "GSW"}, {"startsAt", start},
+                              {"officialGameId", "0022600010"}});
+        auto doc = json::parse(
+            R"({"games":[{"gameId":"0022600010","markets":[{"name":"2way","books":[{"name":null,"outcomes":[{"type":"home","odds":"1.91"}]},{"name":"NullSafe Books","outcomes":[{"type":null,"odds":"1.91"},{"type":"home","odds":null},{"type":"home","odds":"2.00"},{"type":"away","odds":"1.80"}]}]},{"name":null,"books":[{"name":"Ignored","outcomes":[{"type":"home","odds":"9.99"}]}]}]}]})");
+        parse_nba_cdn_odds(doc, s, now_iso());
+        check(s["quotes"].size() == 2, "Only well-formed outcomes become quotes; nulls never throw");
+        check(s["quotes"][0].value("book", "") == "NullSafe Books" &&
+                  s["quotes"][1].value("book", "") == "NullSafe Books",
+              "Quoted book keeps its name");
+        check(s["quotes"][0]["americanOdds"] == 100 && s["quotes"][1]["americanOdds"] == -125,
+              "Surviving prices still convert (2.00 -> +100, 1.80 -> -125)");
+    });
+    test("Pinnacle parsers skip participants and markets with null fields", [&] {
+        auto s = empty_snapshot("live");
+        const auto start = iso_at(parse_time(now_iso()) + 3600);
+        s["games"].push_back({{"id", "g10"}, {"home", "LAL"}, {"away", "GSW"}, {"startsAt", start}});
+        json matchups = json::parse(
+            R"([{"id":7,"type":"matchup","startTime":")" + start +
+            R"(","participants":[{"id":71,"name":null,"alignment":"home"},{"id":72,"name":"Los Angeles Lakers","alignment":"home"},{"id":73,"name":"Golden State Warriors","alignment":"away"},{"id":74,"name":"Mystery Team","alignment":null}]}])");
+        json markets = json::parse(
+            R"([{"matchupId":7,"key":"s;0;m","status":null,"prices":[{"participantId":72,"price":-120},{"participantId":73,"price":100}]},{"matchupId":7,"key":null,"prices":[{"participantId":72,"price":-110}]}])");
+        parse_pinnacle_markets(matchups, markets, s, now_iso());
+        check(s["quotes"].size() == 2, "Null names/alignments/keys are skipped; valid prices still import");
+        check(s["quotes"][0]["americanOdds"] == -120 && s["quotes"][1]["americanOdds"] == 100,
+              "Exact prices survive null neighbours");
+    });
     test("Pinnacle guest requests carry the published site key, others do not", [] {
         auto has = [](const std::vector<std::pair<std::string, std::string>> &headers,
                       const std::string &name, const std::string &value) {
@@ -1312,9 +1343,28 @@ int main() {
         check(has(pinnacle, "X-API-Key", "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"),
               "Pinnacle guest key header sent (keyless calls now return 404)");
         check(has(pinnacle, "Referer", "https://www.pinnacle.com/"), "Pinnacle referer sent");
+        std::string device_uuid;
+        for (const auto &h : pinnacle)
+            if (h.first == "X-Device-UUID")
+                device_uuid = h.second;
+        check(device_uuid.size() == 35 && device_uuid[8] == '-' && device_uuid[17] == '-' &&
+                  device_uuid[26] == '-',
+              "Pinnacle requests carry an anonymous device UUID like the public site's client");
+        std::string device_uuid_again;
+        for (const auto &h :
+             public_request_headers("https://guest.api.arcadia.pinnacle.com/0.1/sports/4/leagues"))
+            if (h.first == "X-Device-UUID")
+                device_uuid_again = h.second;
+        check(!device_uuid_again.empty() && device_uuid_again == device_uuid,
+              "Device UUID is stable within the process");
         const auto stats = public_request_headers("https://stats.nba.com/stats/leaguestandingsv3?LeagueID=00");
         check(!has(stats, "X-API-Key", "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"),
               "Guest key is never sent to other hosts");
+        bool stats_have_uuid = false;
+        for (const auto &h : stats)
+            if (h.first == "X-Device-UUID")
+                stats_have_uuid = true;
+        check(!stats_have_uuid, "Device UUID is never sent to other hosts");
         check(allowed_data_url(
                   "https://guest.api.arcadia.pinnacle.com/0.1/leagues/487/matchups?brandId=0"),
               "Pinnacle brandId URL stays allowlisted");
