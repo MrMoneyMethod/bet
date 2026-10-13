@@ -946,6 +946,58 @@ int main() {
         game["seasonType"] = "exhibition";
         throws([&] { validate_import({{"games", json::array({game})}}); });
     });
+    test("nba_api standings map cities to teams and stay context-only", [&] {
+        auto doc = json::parse(
+            R"({"resultSets":[{"headers":["TeamCity","TeamName","WINS","LOSSES","WinPCT","Record","HOME","ROAD","L10","strCurrentStreak","Conference","PlayoffRank","ConferenceGamesBack","PointsPG","OppPointsPG","DiffPointsPG"],"rowSet":[["Boston","Celtics",40,10,0.8,"40-10","22-3","18-7","8-2","W 4","East",1,0.0,118.5,109.0,9.5],["LA","Clippers",30,20,0.6,"30-20","17-8","13-12","5-5","L 1","West",5,6.5,112.0,111.0,1.0]]}]})");
+        auto s = empty_snapshot("live");
+        parse_standings(doc, s, now_iso());
+        check(s["teams"]["BOS"]["standings"]["wins"] == 40, "Standings wins");
+        near(number(s["teams"]["BOS"]["standings"]["winPct"]), 0.8);
+        check(s["teams"]["LAC"]["standings"]["record"] == "30-20", "LA Clippers city mapping");
+        // Context presence must not move a probability.
+        auto with_context = demo;
+        auto q = find_quote(with_context, "moneyline", "", "home");
+        const double before = number(evaluate_quote(q, with_context)["probability"]);
+        parse_standings(doc, with_context, now_iso());
+        with_context["teams"]["BOS"]["fourFactors"] = {{"efgPct", 0.57}};
+        auto row = evaluate_quote(q, with_context);
+        near(number(row["probability"]), before);
+        bool seen = false;
+        for (const auto &f : row["features"])
+            if (f.value("label", "") == "Home standings win %" && f.value("role", "") == "context")
+                seen = true;
+        check(seen, "Standings shown as context, not a model input");
+        auto dashboard = build_dashboard(with_context);
+        check(dashboard["teams"].size() >= 1 && dashboard["teams"][0].contains("standings"),
+              "Dashboard carries compact standings for schedule cards");
+    });
+    test("nba_api player season stats enrich existing players only, as context", [&] {
+        auto doc = json::parse(
+            R"({"resultSets":[{"headers":["PLAYER_NAME","TEAM_ABBREVIATION","GP","MIN","PTS","REB","AST","FG3M","STL","BLK","FG_PCT","FG3_PCT","FT_PCT","PLUS_MINUS","DD2","TD3"],"rowSet":[["Stephen Curry","GSW",60,34.1,27.6,4.4,6.5,4.7,1.1,0.4,0.47,0.41,0.92,3.2,2,0],["Ghost Player","GSW",10,10.0,5.0,2.0,1.0,0.5,0.2,0.1,0.4,0.3,0.8,0.5,0,0]]}]})");
+        auto s = demo;
+        const auto players_before = s["players"].size();
+        parse_player_season_stats(doc, s, now_iso());
+        check(s["players"].size() == players_before, "A season line never creates a player");
+        check(s["players"][normalize_name("Stephen Curry")]["seasonStats"]["pts"] == 27.6, "Season PTS");
+        auto q = find_quote(s, "points", "Stephen Curry");
+        const double before = number(evaluate_quote(q, demo)["probability"]);
+        auto row = evaluate_quote(q, s);
+        near(number(row["probability"]), before);
+        bool seen = false;
+        for (const auto &f : row["features"])
+            if (f.value("label", "") == "Season points" && f.value("role", "") == "context")
+                seen = true;
+        check(seen, "Season average shown as context beside the log-based projection");
+    });
+    test("nba_api Four Factors parse team and opponent rates", [] {
+        auto doc = json::parse(
+            R"({"resultSets":[{"headers":["TEAM_NAME","TEAM_ABBREVIATION","EFG_PCT","FTA_RATE","TM_TOV_PCT","OREB_PCT","OPP_EFG_PCT","OPP_FTA_RATE","OPP_TOV_PCT","OPP_OREB_PCT"],"rowSet":[["Golden State Warriors","GSW",0.57,0.24,0.13,0.25,0.54,0.22,0.14,0.27]]}]})");
+        auto s = empty_snapshot("live");
+        parse_team_four_factors(doc, s, now_iso());
+        near(number(s["teams"]["GSW"]["fourFactors"]["efgPct"]), 0.57);
+        near(number(s["teams"]["GSW"]["fourFactors"]["oppOrebPct"]), 0.27);
+        check(feature_catalog().size() == 38, "Feature catalog includes the three nba_api context feeds");
+    });
     test("New keyless price hosts are allowlisted and lookalikes are not", [] {
         check(allowed_data_url("https://gamma-api.polymarket.com/events?tag_slug=nba"), "Polymarket");
         check(allowed_data_url("https://external-api.kalshi.com/trade-api/v2/markets"), "Kalshi");

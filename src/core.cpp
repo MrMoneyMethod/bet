@@ -430,6 +430,18 @@ json feature_catalog() {
                          {"label", "Team record / season type"},
                          {"role", "context"},
                          {"source", "ESPN scoreboard"}},
+                        {{"group", "Team environment"},
+                         {"label", "League standings (win %, streak, games back)"},
+                         {"role", "context"},
+                         {"source", "NBA standings via nba_api LeagueStandingsV3"}},
+                        {{"group", "Team environment"},
+                         {"label", "Four Factors shooting / possession profile"},
+                         {"role", "context"},
+                         {"source", "NBA team stats via nba_api LeagueDashTeamStats (Four Factors)"}},
+                        {{"group", "Player history"},
+                         {"label", "Season per-game averages & DD/TD counts"},
+                         {"role", "context"},
+                         {"source", "NBA player stats via nba_api LeagueDashPlayerStats"}},
                         {{"group", "Availability"},
                          {"label", "Player injury / out status"},
                          {"role", "guard"},
@@ -877,6 +889,18 @@ json evaluate_quote(const json &q, const json &s) {
         }
         feature(r, "Matchup pace", pace, "possessions");
         feature(r, "Historical scoring spread", sd, "points");
+        // nba_api-derived context (standings / Four Factors). Displayed as
+        // context only; it does not enter the margin or total above.
+        for (const auto &side_team : {std::pair<const json *, const char *>(&h, "Home"),
+                                      std::pair<const json *, const char *>(&a, "Away")}) {
+            const auto &t = *side_team.first;
+            if (t.contains("standings"))
+                feature(r, std::string(side_team.second) + " standings win %",
+                        100 * number(t["standings"].value("winPct", json(0))), "%", "context");
+            if (t.contains("fourFactors"))
+                feature(r, std::string(side_team.second) + " effective FG %",
+                        100 * number(t["fourFactors"].value("efgPct", json(0))), "%", "context");
+        }
     } else {
         const auto key = normalize_name(q.value("player", ""));
         if (!s["players"].contains(key))
@@ -1139,6 +1163,28 @@ json evaluate_quote(const json &q, const json &s) {
                 feature(r, "True shooting %", 100 * pts / (2 * (fga + 0.44 * fta)), "%", "context");
                 feature(r, "Shot attempts / game", fga / logs.size(), "attempts", "context");
             }
+            // nba_api LeagueDashPlayerStats season line, context only: the
+            // projection above is built from dated game logs, not this average.
+            if (pl.contains("seasonStats")) {
+                const auto &season_stats = pl["seasonStats"];
+                const std::map<std::string, std::pair<std::string, std::string>> season_fields = {
+                    {"points", {"Season points", "pts"}},       {"rebounds", {"Season rebounds", "reb"}},
+                    {"assists", {"Season assists", "ast"}},     {"threes", {"Season 3PM", "fg3m"}},
+                    {"double_double", {"Season double-doubles", "dd2"}},
+                    {"triple_double", {"Season triple-doubles", "td3"}}};
+                auto field = season_fields.find(market);
+                if (field != season_fields.end())
+                    feature(r, field->second.first,
+                            number(season_stats.value(field->second.second, json(0))),
+                            market == "double_double" || market == "triple_double" ? "games" : "per game",
+                            "context");
+                else if (market == "pra")
+                    feature(r, "Season PRA",
+                            number(season_stats.value("pts", json(0))) +
+                                number(season_stats.value("reb", json(0))) +
+                                number(season_stats.value("ast", json(0))),
+                            "per game", "context");
+            }
             int hits = 0, count = 0;
             for (const auto &log : logs) {
                 if (count == 10)
@@ -1323,6 +1369,21 @@ json build_dashboard(const json &snapshot) {
     for (const auto &item : snapshot["players"].items())
         result["players"].push_back(
             {{"name", item.value().value("name", "")}, {"team", item.value().value("team", "")}});
+    // Compact team context for schedule cards (standings / Four Factors from
+    // the nba_api-derived feeds). Deliberately excludes team game logs.
+    result["teams"] = json::array();
+    for (const auto &item : snapshot["teams"].items()) {
+        const auto &t = item.value();
+        if (!t.contains("standings") && !t.contains("fourFactors") && !t.contains("record"))
+            continue;
+        result["teams"].push_back({{"abbr", item.key()},
+                                   {"name", t.value("name", item.key())},
+                                   {"record", t.contains("standings")
+                                                  ? t["standings"].value("record", t.value("record", ""))
+                                                  : t.value("record", "")},
+                                   {"standings", t.value("standings", json(nullptr))},
+                                   {"fourFactors", t.value("fourFactors", json(nullptr))}});
+    }
     return result;
 }
 

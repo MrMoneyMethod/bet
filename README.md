@@ -36,7 +36,7 @@ This is a **working experimental baseline**, not a proven profitable or calibrat
 - Optional all-discovered-season NBA play-by-play archive: SQLite/gzipped raw pages outside Git, paired box-score vectors, dated first-FG opportunities, streaming native feature loading, coverage/gap reporting and atomic local reload.
 - All requested market types: **moneyline; points, rebounds, assists, 3PM O/U; PRA; double-double; triple-double; first basket; team totals O/U**.
 - Joint weighted empirical-bootstrap player predictions, transparent moneyline/team-total baselines, push-aware EV and same-book matched no-vig comparisons.
-- **35-signal inventory:** 20 model inputs, 6 context-only signals, 4 eligibility guards and 5 explicitly unimplemented future inputs. The research panel lists fields actually available for each estimate.
+- **38-signal inventory:** 20 model inputs, 9 context-only signals, 4 eligibility guards and 5 explicitly unimplemented future inputs. The context layer now includes NBA standings, team Four Factors and player season averages (endpoint definitions from [swar/nba_api](https://github.com/swar/nba_api), re-implemented in C++; no Python runtime), shown on schedule cards and in research panels without altering any probability. The research panel lists fields actually available for each estimate.
 - Injury context, recent minutes, home/away weighting, pace, team ratings, chronological Elo, rest differential, joint stat covariance and live accrued stats.
 - Search, market/book/game/status filters, +EV/minimum-EV filtering, sorting, pagination, watchlist, research panel, CSV export, data-health/model-lab pages and responsive layouts.
 - Atomic CSV/JSON import validation, a constrained public-ESPN-HTML schema-fallback scraper, and saved-HTML data extraction. HTML/JavaScript is never executed by the scraper.
@@ -124,7 +124,7 @@ This builds `releases/Edgecourt.exe` with static C++ runtime libraries; remainin
 
 ## Tests and validation
 
-- **71 C++ test cases** and **19 offline historical collector tests**; `edgecourt_tests` reports the current count.
+- **74 C++ test cases** and **19 offline historical collector tests**; `edgecourt_tests` reports the current count.
 - Native historical pipeline test: synthetic saved pages → complete event archive → feature export → live/offline native estimates, dated first-FG counts, current lineup import, atomic reload and removed-bundle cleanup.
 - Native-process API tests: assets, Host/Origin/token guards, synthetic isolation, imports, deduplication, atomic failures, CSV templates and refresh.
 - Browser interaction tests: categories/search/EV/game/status filters, watchlist, imports/errors, XSS escaping, export, pagination, settings, model lab and mobile layout.
