@@ -1000,74 +1000,7 @@ int main() {
                   s["quotes"][0]["observedAt"] == fetched,
               "Team selection and provider timestamp are matched to the scheduled game");
     });
-    test("Sportsbook API2 events map pregame full-game moneylines with guarded payout parsing", [&] {
-        auto s = empty_snapshot("live");
-        const auto starts = parse_time(now_iso()) + 3 * 60 * 60;
-        const auto start = iso_at(starts);
-        const auto fetched = now_iso();
-        s["games"].push_back({{"id", "api2-game"}, {"home", "LAL"}, {"away", "GSW"},
-                              {"startsAt", start}, {"status", "upcoming"}});
-        json home_decimal = {{"participantKey", "home-key"},
-                             {"participant", {{"name", "Los Angeles Lakers"}}},
-                             {"payout", 1.91}, {"live", false}, {"readAt", fetched}};
-        json away_american = {{"participantKey", "away-key"},
-                              {"participant", {{"name", "Golden State Warriors"}}},
-                              {"payout", 110}, {"live", false}, {"lastFoundAt", fetched}};
-        json live_home = {{"participantKey", "home-key"}, {"payout", -110}, {"live", true}};
-        json unsupported = {{"participantKey", "away-key"}, {"payout", 0.5}, {"live", false}};
-        json quarter_home = {{"participantKey", "home-key"}, {"payout", 2.0}, {"live", false}};
-        json event = {{"key", "NBA-EVENT-1"},
-                      {"type", "MATCH"},
-                      {"startTime", start},
-                      {"homeParticipantKey", "home-key"},
-                      // Away precedes home to exercise participant-key orientation.
-                      {"participants", json::array({
-                           {{"key", "away-key"}, {"name", "Golden State Warriors"}, {"sport", "basketball"}},
-                           {{"key", "home-key"}, {"name", "Los Angeles Lakers"}, {"sport", "basketball"}}})},
-                      {"markets", json::array({
-                           {{"key", "full-ml"}, {"type", "MONEYLINE"}, {"segment", "FULL_GAME"},
-                            {"outcomes", {{"DRAFT_KINGS", json::array({home_decimal, away_american, live_home})},
-                                           {"BET_MGM", json::array({unsupported})}}}},
-                           {{"key", "q1-ml"}, {"type", "MONEYLINE"}, {"segment", "Q1"},
-                            {"outcomes", {{"DRAFT_KINGS", json::array({quarter_home})}}}},
-                           {{"key", "spread"}, {"type", "SPREAD"}, {"segment", "FULL_GAME"},
-                            {"outcomes", {{"DRAFT_KINGS", json::array({home_decimal})}}}}})}};
-        json event_list = {{"events", json::array({event})}};
-        check(sportsbook_api2_nba_competition_key(
-                  {{"competitions", json::array({
-                      {{"key", "nba-key"}, {"name", "National Basketball Association"}, {"sport", "Basketball"}},
-                      {{"key", "wnba-key"}, {"name", "WNBA"}, {"sport", "Basketball"}}})}}) == "nba-key",
-              "Only the basketball NBA competition is selected");
-        const auto event_keys = sportsbook_api2_match_event_keys(event_list, s);
-        check(event_keys.size() == 1 && event_keys[0] == "NBA-EVENT-1",
-              "Only NBA teams and start times matching the scheduled game are requested");
-        // A newer SharpAPI selection for the same sportsbook/team must not be
-        // replaced by this source's older cached outcome.
-        json newer_direct = {{"gameId", "api2-game"}, {"market", "moneyline"}, {"player", ""},
-                             {"team", "LAL"}, {"side", "home"}, {"line", nullptr},
-                             {"book", "DraftKings"}, {"observedAt", iso_at(parse_time(fetched) + 60)},
-                             {"timestampKind", "retrieved"}, {"source", "sharpapi"}, {"status", "open"},
-                             {"settlement", "full_game_including_ot"}, {"demo", false},
-                             {"americanOdds", -105}};
-        newer_direct["id"] = quote_id(newer_direct);
-        s["quotes"].push_back(newer_direct);
-        const int imported = parse_sportsbook_api2_odds(event_list, s, s, fetched);
-        check(imported == 1 && s["quotes"].size() == 2,
-              "Quarter, spread, live and unsupported payout outcomes are skipped");
-        const auto &kept_home = s["quotes"][0];
-        check(kept_home["source"] == "sharpapi" && kept_home["americanOdds"] == -105,
-              "An older API2 response cannot replace a fresher bookmaker quote");
-        const auto &away_quote = s["quotes"][1];
-        check(away_quote["book"] == "DraftKings" && away_quote["side"] == "away" &&
-                  away_quote["americanOdds"] == 110 && away_quote["source"] == "sportsbookapi2" &&
-                  away_quote["payoutFormat"] == "american",
-              "American payout and participant key normalize into the scheduled away quote");
-        check(sportsbook_api2_quota_allows(39, 50, 10, 1) &&
-                  !sportsbook_api2_quota_allows(40, 50, 10, 1) &&
-                  !sportsbook_api2_quota_allows(-1, 50, 10, 1),
-              "Daily guard honors the lower 50-request cap and protects the ten-call reserve");
-    });
-    test("NBA_Go, TheSportsDB and SportScore attach context without changing model data", [&] {
+    test("NBA_Go and TheSportsDB attach context without changing model data", [&] {
         auto s = empty_snapshot("live");
         const auto starts = parse_time(now_iso()) + 3 * 60 * 60;
         const auto start = iso_at(starts);
@@ -1102,14 +1035,6 @@ int main() {
         check(parse_thesportsdb_schedule(sportsdb, s, now_iso()) == 1 &&
                   s["games"][0]["externalContext"]["theSportsDB"]["venue"] == "Crypto.com Arena",
               "TheSportsDB schedule metadata attaches to the same NBA game");
-        json sportscore = {{"sport", "basketball"}, {"matches", json::array({
-            {{"home", "Los Angeles Lakers"}, {"away", "Golden State Warriors"},
-             {"home_score", 12}, {"away_score", 9}, {"status", "live"},
-             {"status_text", "Q1"}, {"time", start}, {"slug", "lakers-warriors-context"}}
-        })}};
-        check(parse_sportscore_fixtures(sportscore, s, now_iso()) == 1 &&
-                  s["games"][0]["externalContext"]["sportScore"]["homeScore"] == 12,
-              "SportScore fixture/scores are joined by teams and start time");
         check(s["games"][0]["homeScore"] == 0 && s["games"][0]["awayScore"] == 0 &&
                   s["quotes"].empty() && s["teams"].empty(),
               "Context-only providers do not overwrite scores, add odds or modify model team inputs");
@@ -1721,9 +1646,9 @@ int main() {
               "The RapidAPI key is withheld until its product host is confirmed");
         set_env("RAPIDAPI_HOST", "sportsbook-api2.p.rapidapi.com");
         const auto rapid = public_request_headers("https://sportsbook-api2.p.rapidapi.com/v0/competitions");
-        check(has_header(rapid, "X-RapidAPI-Key", "rapidapi-fixture-not-a-credential") &&
-                  has_header(rapid, "X-RapidAPI-Host", "sportsbook-api2.p.rapidapi.com"),
-              "RapidAPI key/host headers require exact product-host confirmation");
+        check(!has_header(rapid, "X-RapidAPI-Key", "rapidapi-fixture-not-a-credential") &&
+                  !has_header(rapid, "X-RapidAPI-Host", "sportsbook-api2.p.rapidapi.com"),
+              "Removed provider receives no credentials even with host confirmation");
         set_env("RAPIDAPI_HOST", "wrong-product.p.rapidapi.com");
         const auto rapid_mismatch = public_request_headers("https://sportsbook-api2.p.rapidapi.com/v0/competitions");
         check(std::none_of(rapid_mismatch.begin(), rapid_mismatch.end(),
@@ -1734,8 +1659,8 @@ int main() {
         check(has_header(sportsdb, "X-API-KEY", "sportsdb-fixture-not-a-credential"),
               "TheSportsDB V2 key uses its documented header");
         const auto score = public_request_headers("https://sportscore.com/api/v1/fixtures/?sport=basketball");
-        check(has_header(score, "X-Api-Key", "sportscore-fixture-not-a-credential"),
-              "SportScore optional key uses its documented header");
+        check(!has_header(score, "X-Api-Key", "sportscore-fixture-not-a-credential"),
+              "Removed speculative SportScore adapter sends no credential");
         for (const auto &url : {
                  "https://api.server.nbaapi.com/api/games?date=2026-10-13",
                  "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
@@ -1778,14 +1703,14 @@ int main() {
         check(allowed_data_url("https://api.sharpapi.io/api/v1/odds?league=nba"), "SharpAPI exact host");
         check(!allowed_data_url("https://api.sharpapi.io.evil.test/api/v1/odds"),
               "SharpAPI lookalike host");
-        check(allowed_data_url("https://sportsbook-api2.p.rapidapi.com/v0/competitions"), "Sportsbook API2 exact host");
+        check(!allowed_data_url("https://sportsbook-api2.p.rapidapi.com/v0/competitions"), "Removed unverified API2 host");
         check(!allowed_data_url("https://sportsbook-api2.p.rapidapi.com.evil.test/v0/competitions"),
               "Sportsbook API2 lookalike host");
         check(allowed_data_url("https://www.thesportsdb.com/api/v2/json/schedule/next/league/4387"),
               "TheSportsDB exact host");
         check(!allowed_data_url("https://www.thesportsdb.com.evil.test/api/v2/json/schedule/next/league/4387"),
               "TheSportsDB lookalike host");
-        check(allowed_data_url("https://sportscore.com/api/v1/fixtures/?sport=basketball"), "SportScore exact host");
+        check(!allowed_data_url("https://sportscore.com/api/v1/fixtures/?sport=basketball"), "Removed SportScore route");
         check(!allowed_data_url("https://sportscore.com.evil.test/api/v1/fixtures"), "SportScore lookalike host");
         check(allowed_data_url("https://api.server.nbaapi.com/api/games?date=2026-10-13"), "NBA_Go exact host");
         check(!allowed_data_url("https://api.server.nbaapi.com.evil.test/api/games"), "NBA_Go lookalike host");

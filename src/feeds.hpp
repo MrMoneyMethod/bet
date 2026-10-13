@@ -16,6 +16,7 @@ struct FeedResponse {
     bool cached = false, stale = false;
     int status = 0;
 };
+bool valid_feed_payload(const std::string &url, const json &data);
 bool allowed_data_url(const std::string &url);
 // Per-host request headers for public_get. Keyed feeds receive only their
 // respective environment credentials on exact fixed hosts. Linux transports
@@ -82,45 +83,35 @@ void parse_nba_cdn_odds(const json &document, json &snapshot, const std::string 
 void parse_kalshi_markets(const json &document, json &snapshot, const std::string &fetched_at);
 void parse_sharpapi_odds(const json &document, const json &schedule, json &snapshot,
                          const std::string &fetched_at);
-// Sportsbook API2/RapidAPI NBA pregame moneylines. The numeric `payout` field
-// is not unit-labeled by the provider schema; parsers accept plausible American
-// or decimal prices only and leave other formats unpriced.
-int parse_sportsbook_api2_odds(const json &document, const json &schedule, json &snapshot,
-                               const std::string &fetched_at);
-std::string sportsbook_api2_nba_competition_key(const json &document);
-std::vector<std::string> sportsbook_api2_match_event_keys(const json &document, const json &schedule);
 // Optional cross-source context. These attach metadata to matching scheduled
 // games only; none of these providers changes scores, ratings or probabilities.
 int parse_nba_go_games(const json &document, json &snapshot, const std::string &fetched_at);
 int parse_thesportsdb_schedule(const json &document, json &snapshot, const std::string &fetched_at);
-int parse_sportscore_fixtures(const json &document, json &snapshot, const std::string &fetched_at);
-bool sportsbook_api2_quota_allows(int current, int daily_limit, int reserve, int calls_needed = 1);
 void parse_pinnacle_markets(const json &matchups, const json &markets, json &snapshot,
                             const std::string &fetched_at);
 json scrape_saved_html(const std::string &html, const std::string &player = "", const std::string &team = "",
                        const std::string &observed_at = "");
 class PublicFeeds {
   public:
-    explicit PublicFeeds(std::filesystem::path cache_dir);
+    using Transport = std::function<HttpResponse(const std::string &)>;
+    explicit PublicFeeds(std::filesystem::path cache_dir, Transport transport = {});
     json refresh(const json &previous, const std::atomic<bool> *cancelled = nullptr);
 
-  private:
+    // Also used by the diagnostic CLI; the same cache, schema and request guards apply.
     FeedResponse get(const std::string &url, int ttl_seconds, int max_stale_seconds = 0,
                      int failed_retry_seconds = 0,
                      const std::function<bool(const std::string &, std::string &)> &may_request = {});
+  private:
+    Transport transport_;
+    bool throttle_ = true;
     bool ensure_api_basketball_quota(int calls_needed, std::string &reason);
     void save_api_basketball_quota();
     void record_api_basketball_response(const json &document);
-    bool ensure_sportsbook_api2_quota(int calls_needed, std::string &reason);
-    void save_sportsbook_api2_quota();
     std::filesystem::path cache_dir_;
     int requests_ = 0;
     int api_basketball_current_ = 0, api_basketball_limit_ = 0;
-    int sportsbook_api2_current_ = 0;
     bool api_basketball_quota_checked_ = false, api_basketball_active_ = false;
-    bool sportsbook_api2_quota_loaded_ = false;
     std::string api_basketball_quota_date_, api_basketball_quota_checked_at_, api_basketball_quota_error_;
-    std::string sportsbook_api2_quota_date_;
     const std::atomic<bool> *cancelled_ = nullptr;
 };
 } // namespace edgecourt

@@ -21,27 +21,16 @@ real credentials in a script, project file, issue or chat:
 
   $env:API_BASKETBALL_KEY = "YOUR_API_SPORTS_KEY"
   $env:SHARPAPI_KEY = "YOUR_SHARPAPI_KEY"
-  $env:RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY"
-  # Only if this exactly matches your generated RapidAPI code snippet:
-  $env:RAPIDAPI_HOST = "sportsbook-api2.p.rapidapi.com"
   $env:THESPORTSDB_KEY = "YOUR_PREMIUM_THESPORTSDB_KEY"
-  $env:SPORTSCORE_KEY = "OPTIONAL_SPORTSCORE_KEY"
   .\Edgecourt.exe
 
 API-Basketball and SharpAPI enable named-book pregame NBA moneylines when
-configured. Sportsbook API2 uses RAPIDAPI_KEY and conservatively honors the
-lower published limit of 50 requests/day: Edgecourt stops at 40/day and keeps
-ten requests in reserve; its normal odds cache is two hours. The configured
-RapidAPI host is inferred from the product slug, not live-confirmed; compare
-it with the host in your generated RapidAPI code snippet before first use. The
-app sends no request or key until RAPIDAPI_HOST is set to that exact host. Numeric API2
-payout units are undocumented, so the odds conversion is heuristic until
-verified against a sanitized provider response. TheSportsDB V2 is premium
-and uses THESPORTSDB_KEY in the X-API-KEY header. SportScore works without a
-key; SPORTSCORE_KEY is optional. SportScore context is linked with the required
-visible dofollow attribution. NBA_Go is keyless according to the inspected
-Swagger. NBA_Go, TheSportsDB and SportScore supply context only and do not
-change a probability. Requests may count against provider plan quotas/billing.
+configured. TheSportsDB V2 is premium and uses THESPORTSDB_KEY in the
+X-API-KEY header. NBA_Go is keyless according to the inspected Swagger.
+NBA_Go and TheSportsDB supply context only and do not change a probability.
+Sportsbook API2 and SportScore have been removed because their configured
+host/route or numeric units were not established; no requests or credentials
+are sent to them. Requests may count against provider plan quotas/billing.
 If you shared a real key outside the provider's secret manager, rotate it.
 Unset optional variables after use if you share the PowerShell session.
 
@@ -70,6 +59,20 @@ historical first-FG counts; confirmations must match starterGameId.
 These are not guessed from points per game. Live player overtime rotations
 are not modeled; those forecasts are suppressed. Achieved full-game
 thresholds are not treated as new edges.
+
+VOLUME & WHALES
+---------------
+Open Volume & whales for Polymarket market turnover/liquidity in USDC,
+Kalshi volume/open interest in contracts, and large public Polymarket wallet
+fills. Filter by size, exchange, matchup, wallet or buy/sell and export a
+sample. Demo activity is explicitly synthetic and isolated from Live.
+
+This is exchange activity, NOT sportsbook betting handle or private bettor
+tracking. Units are never added together. The rolling 24-hour public trade
+sample is bounded and may miss fills; it does not establish profit, net
+positions, unique people or informed betting. Missing/stale coverage is
+labeled and activity never changes model probabilities or EV.
+See docs/API_AUDIT.md for provider selection and verification limits.
 
 HISTORICAL PLAY-BY-PLAY (OPTIONAL)
 ---------------------------------

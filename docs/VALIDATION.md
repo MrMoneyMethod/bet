@@ -1,3 +1,14 @@
+# Current verification: exchange activity and provider audit (2026-10-13)
+
+This section supersedes provider integration claims in the historical notes below.
+Sportsbook API2 and SportScore have been removed. Current code passed all **5 CTest suites**, both browser suites, JavaScript syntax and diff whitespace checks. The native probe could not receive HTTP responses from provider hosts due to sandbox egress restrictions. No current upstream functionality or rate-limit ceiling is claimed verified. Windows binaries were subsequently rebuilt with Zig 0.13.0, packaged with updated instructions, and inspected for x64 PE format, Windows-system DLL imports, embedded activity UI, ZIP integrity and matching SHA-256 manifests. No Windows runtime test was performed in this Linux sandbox.
+
+See [API_AUDIT.md](API_AUDIT.md) for reproducible commands, scope, source decisions and known limitations, and [provider-probe.json](provider-probe.json) for measured results.
+
+---
+
+## Historical validation notes (prior revision, retained for provenance)
+
 # Edgecourt 0.2.0 — build and validation report
 
 **Date:** 2026-10-13 (UTC). Source and release artifact were built in a Linux sandbox. This report separates software tests from real-world prediction validation.

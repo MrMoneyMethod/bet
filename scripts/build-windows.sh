@@ -15,7 +15,7 @@ export ZIG_LOCAL_CACHE_DIR="$PWD/.cache/zig-local"
 "$ZIG" c++ -target x86_64-windows-gnu -std=c++17 -O2 -g0 -static -fno-sanitize=all \
   -DNOMINMAX -DWIN32_LEAN_AND_MEAN \
   -Ivendor -Isrc -Ibuild/windows/generated \
-  src/core.cpp src/feeds.cpp src/history.cpp src/history_download.cpp src/app.cpp src/main.cpp \
+  src/core.cpp src/activity.cpp src/feeds.cpp src/history.cpp src/history_download.cpp src/app.cpp src/main.cpp \
   -lwinhttp -lws2_32 -lshell32 -o build/windows/Edgecourt.exe
 cp build/windows/Edgecourt.exe releases/Edgecourt.exe
 printf '\nBuilt releases/Edgecourt.exe\n'

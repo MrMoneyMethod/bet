@@ -1,0 +1,124 @@
+{
+  "failedOrUnverified": 12,
+  "generatedAt": "2026-10-13T21:38:29Z",
+  "passed": 0,
+  "results": [
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 47,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "ESPN scoreboard",
+      "url": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=20261013&limit=100"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 291,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "ESPN roster",
+      "url": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/2/roster"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 297,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "NBA CDN scoreboard",
+      "url": "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 299,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "NBA CDN sportsbook odds",
+      "url": "https://cdn.nba.com/static/json/liveData/odds/odds_todaysGames.json"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 0,
+      "envelopeValid": false,
+      "error": "Provider host circuit open until 2026-10-13T21:43:30Z; previous access/rate-limit or repeated transport failure. No alternate route attempted.",
+      "httpStatus": 0,
+      "provider": "NBA season schedule",
+      "url": "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 300,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "Polymarket Gamma NBA events",
+      "url": "https://gamma-api.polymarket.com/events?tag_slug=nba&active=true&closed=false&limit=100&offset=0"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 299,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "Polymarket Data API public trades",
+      "url": "https://data-api.polymarket.com/trades?limit=1&takerOnly=true&filterType=CASH&filterAmount=1000"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 299,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "Kalshi NBA contracts",
+      "url": "https://external-api.kalshi.com/trade-api/v2/markets?series_ticker=KXNBAGAME&status=open&limit=200"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 299,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "Pinnacle guest basketball leagues",
+      "url": "https://guest.api.arcadia.pinnacle.com/0.1/sports/4/leagues"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 300,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "NBA Stats standings",
+      "url": "https://stats.nba.com/stats/leaguestandingsv3?LeagueID=00&Season=2026-27&SeasonType=Regular%20Season&SeasonYear="
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 297,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "NBA daily lineups",
+      "url": "https://stats.nba.com/js/data/leaders/00_daily_lineups_20261013.json"
+    },
+    {
+      "classification": "network_unverified",
+      "elapsedMs": 343,
+      "envelopeValid": false,
+      "error": "HTTPS source unavailable (curl exit 35)",
+      "httpStatus": 0,
+      "provider": "NBA_Go context",
+      "url": "https://api.server.nbaapi.com/api/games?date=2026-10-13&page=1&pageSize=100&sortBy=date&ascending=false&include=lineScores%2CplayerGameBasicStats%2CteamGameAdvStats"
+    }
+  ],
+  "scope": "Representative public endpoints; transport and envelope validation, not a guarantee of usable NBA joins or unrestricted quotas.",
+  "skipped": [
+    "API-Basketball: optional keyed quota",
+    "SharpAPI: optional key",
+    "TheSportsDB: premium key",
+    "Sportsbook API2: removed, speculative contract",
+    "SportScore: removed, unestablished fixtures route"
+  ],
+  "warning": "Transport failures in a restricted network do not establish provider outages. Live rate limits were not load-tested."
+}

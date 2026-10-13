@@ -1,4 +1,5 @@
 #include "feeds.hpp"
+#include "activity.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -35,8 +36,8 @@ constexpr size_t MAX_RESPONSE = 16 * 1024 * 1024;
 // moneyline fetches run first so stats/roster enrichment cannot starve them.
 // The budget also covers the league-wide official datasets below; they are
 // one request each and season datasets cache for 6 hours, so the budget is
-// only approached on a cold cache. The small increase accommodates the four
-// optional context feeds without removing the overall burst bound.
+// only approached on a cold cache. Exchange discovery and trade pagination
+// share this same ceiling rather than adding an unbounded fan-out.
 constexpr int MAX_REQUESTS_PER_REFRESH = 72;
 // API-Basketball's free key tier is documented at 100 requests/day. This
 // adapter only needs its schedule crosswalk and moneyline feed, which are
@@ -53,34 +54,16 @@ constexpr int SHARPAPI_CACHE_SECONDS = 5 * 60;
 constexpr int SHARPAPI_MAX_STALE_SECONDS = 15 * 60;
 constexpr int SHARPAPI_FAILURE_RETRY_SECONDS = 5 * 60;
 constexpr int SHARPAPI_MAX_PAGES = 4;
-// Sportsbook API2 plan limits conflict (publisher: 50/day; RapidAPI listing:
-// 150/day). Use the lower figure and leave ten calls for other consumers of
-// the user's RapidAPI key. Normal polling is below this hard daily ceiling.
-constexpr int SPORTSBOOK_API2_DAILY_LIMIT = 50;
-constexpr int SPORTSBOOK_API2_RESERVE_REQUESTS = 10;
-constexpr int SPORTSBOOK_API2_COMPETITIONS_CACHE_SECONDS = 24 * 60 * 60;
-constexpr int SPORTSBOOK_API2_EVENTS_CACHE_SECONDS = 6 * 60 * 60;
-constexpr int SPORTSBOOK_API2_ODDS_CACHE_SECONDS = 2 * 60 * 60;
 constexpr int NBA_GO_CACHE_SECONDS = 6 * 60 * 60;
 constexpr int THESPORTSDB_CACHE_SECONDS = 6 * 60 * 60;
-constexpr int SPORTSCORE_CACHE_SECONDS = 6 * 60 * 60;
-constexpr char SPORTSBOOK_API2_RAPIDAPI_HOST[] = "sportsbook-api2.p.rapidapi.com";
 bool api_basketball_host(const std::string &url) {
     return url.rfind("https://v1.basketball.api-sports.io/", 0) == 0;
 }
 bool sharpapi_host(const std::string &url) {
     return url.rfind("https://api.sharpapi.io/", 0) == 0;
 }
-// Inferred from the RapidAPI product slug, not confirmed by an authenticated
-// call; compare with RapidAPI's generated X-RapidAPI-Host snippet before use.
-bool sportsbook_api2_host(const std::string &url) {
-    return url.rfind(std::string("https://") + SPORTSBOOK_API2_RAPIDAPI_HOST + "/", 0) == 0;
-}
 bool thesportsdb_host(const std::string &url) {
     return url.rfind("https://www.thesportsdb.com/api/v2/json/", 0) == 0;
-}
-bool sportscore_host(const std::string &url) {
-    return url.rfind("https://sportscore.com/api/", 0) == 0;
 }
 std::string environment_key(const char *name) {
     const char *value = std::getenv(name);
@@ -105,19 +88,8 @@ std::string api_basketball_key() {
 std::string sharpapi_key() {
     return environment_key("SHARPAPI_KEY");
 }
-std::string rapidapi_key() {
-    return environment_key("RAPIDAPI_KEY");
-}
-bool sportsbook_api2_host_confirmed() {
-    // Never send a RapidAPI credential to an inferred product host until the
-    // user confirms that exact host against RapidAPI's generated code snippet.
-    return environment_key("RAPIDAPI_HOST") == SPORTSBOOK_API2_RAPIDAPI_HOST;
-}
 std::string thesportsdb_key() {
     return environment_key("THESPORTSDB_KEY");
-}
-std::string sportscore_key() {
-    return environment_key("SPORTSCORE_KEY");
 }
 json read_small_json(const std::filesystem::path &path, size_t max_size = 4096) {
     try {
@@ -166,7 +138,7 @@ std::string clean_timestamp(std::string value) {
     // ESPN frequently returns minute precision, NBA sometimes millisecond precision.
     if (value.size() == 17 && value.back() == 'Z')
         value.insert(16, ":00");
-    if (value.size() > 20 && value[19] == '.')
+    if (value.size() > 20 && value[19] == '.' && value.back() == 'Z')
         value = value.substr(0, 19) + "Z";
     return value;
 }
@@ -375,9 +347,9 @@ void walk_espn(const json &node, json &snapshot, int depth = 0) {
 bool allowed_data_url(const std::string &url) {
     static const std::regex expression(
         "^https://(site\\.api\\.espn\\.com|cdn\\.nba\\.com|stats\\.nba\\.com|www\\.espn\\.com|"
-        "gamma-api\\.polymarket\\.com|external-api\\.kalshi\\.com|guest\\.api\\.arcadia\\.pinnacle\\.com|"
-        "v1\\.basketball\\.api-sports\\.io|api\\.sharpapi\\.io|sportsbook-api2\\.p\\.rapidapi\\.com|"
-        "api\\.server\\.nbaapi\\.com|www\\.thesportsdb\\.com|sportscore\\.com)"
+        "gamma-api\\.polymarket\\.com|data-api\\.polymarket\\.com|external-api\\.kalshi\\.com|guest\\.api\\.arcadia\\.pinnacle\\.com|"
+        "v1\\.basketball\\.api-sports\\.io|api\\.sharpapi\\.io|"
+        "api\\.server\\.nbaapi\\.com|www\\.thesportsdb\\.com)"
         "/[^\\r\\n\\t \"]*$");
     return url.size() < 4096 && std::regex_match(url, expression);
 }
@@ -439,22 +411,10 @@ std::vector<std::pair<std::string, std::string>> public_request_headers(const st
         if (!key.empty())
             headers.push_back({"X-API-Key", key});
     }
-    if (sportsbook_api2_host(url) && sportsbook_api2_host_confirmed()) {
-        const auto key = rapidapi_key();
-        if (!key.empty()) {
-            headers.push_back({"X-RapidAPI-Key", key});
-            headers.push_back({"X-RapidAPI-Host", SPORTSBOOK_API2_RAPIDAPI_HOST});
-        }
-    }
     if (thesportsdb_host(url)) {
         const auto key = thesportsdb_key();
         if (!key.empty())
             headers.push_back({"X-API-KEY", key});
-    }
-    if (sportscore_host(url)) {
-        const auto key = sportscore_key();
-        if (!key.empty())
-            headers.push_back({"X-Api-Key", key});
     }
     if (url.rfind("https://guest.api.arcadia.pinnacle.com/", 0) == 0) {
         // Pinnacle's guest tier (the API its public website calls) answers
@@ -1291,48 +1251,77 @@ json external_moneyline(const json &game, const std::string &team, const std::st
             {"sourceUrl", url}};
 }
 } // namespace
+namespace {
+json nonnegative_field(const json &obj, const char *key, const char *fallback = "") {
+    const auto nan = std::numeric_limits<double>::quiet_NaN();
+    double value = number(obj.value(key, json()), nan);
+    if (!std::isfinite(value) && *fallback) value = number(obj.value(fallback, json()), nan);
+    return std::isfinite(value) && value >= 0 && value <= 1e15 ? json(value) : json(nullptr);
+}
+const json *nearest_exchange_game(const json &s, const std::string &one, const std::string &two,
+                                   const std::string &time) {
+    const auto target = parse_time(time);
+    if (!target) return nullptr;
+    const json *best = nullptr;
+    long long distance = 2 * 86400 + 1;
+    bool ambiguous = false;
+    for (const auto &g : s["games"]) {
+        if (!((g.value("home", "") == one && g.value("away", "") == two) ||
+              (g.value("home", "") == two && g.value("away", "") == one))) continue;
+        const auto start = parse_time(g.value("startsAt", ""));
+        if (!start) continue;
+        const auto d = std::llabs(start - target);
+        if (d == distance) ambiguous = true;
+        if (d < distance) { best = &g; distance = d; ambiguous = false; }
+    }
+    return ambiguous ? nullptr : best;
+}
+}
 void parse_polymarket_events(const json &doc, json &s, const std::string &fetched) {
-    if (!doc.is_array())
-        return;
+    if (!doc.is_array()) return;
     for (const auto &event : doc) {
-        if (!event.is_object())
-            continue;
-        const auto slug = event.value("slug", "");
-        for (const auto &market : array_field(event.value("markets", json()))) {
-            if (!market.is_object() || market.value("closed", false) || !market.value("active", true))
-                continue;
-            // Game winner markets only: spreads/totals/futures never map onto app markets.
-            const auto type = market.value("sportsMarketType", "");
-            if (!type.empty() && type != "moneyline")
-                continue;
-            auto outcomes = array_field(market.value("outcomes", json())),
-                 prices = array_field(market.value("outcomePrices", json()));
-            if (outcomes.size() != 2 || prices.size() != 2)
-                continue;
-            std::string abbr[2];
-            double price[2];
-            for (int i = 0; i < 2; ++i) {
-                abbr[i] = abbr_from_name(text(outcomes[i]));
-                price[i] = number(prices[i], -1);
-                if (abbr[i].empty() || price[i] <= 0.001 || price[i] >= 0.999)
-                    break;
+        if (!event.is_object()) continue;
+        const auto slug = string_field(event, "slug");
+        for (const auto &m : array_field(event.value("markets", json()))) {
+            if (!m.is_object() || m.value("closed", json(false)) != false ||
+                m.value("active", json(true)) != true) continue;
+            const auto type = string_field(m, "sportsMarketType");
+            if (!type.empty() && type != "moneyline") continue;
+            const auto outcomes = array_field(m.value("outcomes", json()));
+            const auto prices = array_field(m.value("outcomePrices", json()));
+            if (outcomes.size() != 2) continue;
+            const std::string teams[] = {abbr_from_name(text(outcomes[0])), abbr_from_name(text(outcomes[1]))};
+            if (teams[0].empty() || teams[1].empty() || teams[0] == teams[1]) continue;
+            auto start = string_field(m, "gameStartTime");
+            if (start.size() > 19 && start[10] == ' ') start[10] = 'T';
+            if (start.size() >= 6 && start.substr(start.size() - 6) == "+00:00")
+                start = start.substr(0, start.size() - 6) + "Z";
+            if (start.size() >= 3 && start.substr(start.size() - 3) == "+00")
+                start = start.substr(0, start.size() - 3) + "Z";
+            start = clean_timestamp(start);
+            if (!parse_time(start)) start = clean_timestamp(string_field(m, "endDate"));
+            const auto game = nearest_exchange_game(s, teams[0], teams[1], start);
+            if (!game) continue;
+            auto condition = string_field(m, "conditionId");
+            std::transform(condition.begin(), condition.end(), condition.begin(), [](unsigned char c) { return std::tolower(c); });
+            if (std::regex_match(condition, std::regex("^0x[0-9a-f]{64}$"))) {
+                json tokens = json::object();
+                const auto ids = array_field(m.value("clobTokenIds", json()));
+                if (ids.size() == 2 && ids[0].is_string() && ids[1].is_string() && ids[0] != ids[1])
+                    for (int i = 0; i < 2; ++i) tokens[ids[i].get<std::string>()] = teams[i];
+                record_exchange_market(s, {{"id", "polymarket:" + condition}, {"marketId", condition},
+                    {"provider", "polymarket"}, {"gameId", (*game)["id"]}, {"label", string_field(m, "question", "Game winner")},
+                    {"volume", nonnegative_field(m, "volumeNum", "volume")}, {"volume24h", nonnegative_field(m, "volume24hr")},
+                    {"liquidity", nonnegative_field(m, "liquidityNum", "liquidity")}, {"openInterest", nullptr},
+                    {"unit", "USDC"}, {"outcomeTokens", tokens}, {"observedAt", fetched}, {"demo", false}});
             }
-            if (abbr[0].empty() || abbr[1].empty() || abbr[0] == abbr[1] || price[0] <= 0.001 ||
-                price[1] <= 0.001 || price[0] >= 0.999 || price[1] >= 0.999)
-                continue;
-            const json *game = find_game(s, abbr[0], abbr[1]);
-            std::string home = abbr[0], away = abbr[1];
-            if (!game) {
-                game = find_game(s, abbr[1], abbr[0]);
-                home = abbr[1];
-                away = abbr[0];
-            }
-            if (!game || !within_days(game->value("startsAt", ""), market.value("endDate", ""), 2))
-                continue;
+            if (prices.size() != 2) continue;
+            const double p[] = {number(prices[0], -1), number(prices[1], -1)};
+            if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || p[0] <= .001 || p[1] <= .001 || p[0] >= .999 || p[1] >= .999) continue;
             for (int i = 0; i < 2; ++i) {
-                auto q = external_moneyline(*game, abbr[i], abbr[i] == home ? "home" : "away", "Polymarket",
-                                            "polymarket", fetched, "https://polymarket.com/event/" + slug);
-                q["oddsPercent"] = price[i] * 100;
+                auto q = external_moneyline(*game, teams[i], teams[i] == game->value("home", "") ? "home" : "away",
+                    "Polymarket", "polymarket", fetched, "https://polymarket.com/event/" + slug);
+                q["oddsPercent"] = p[i] * 100;
                 q["americanOdds"] = nullptr;
                 add_external_quote(s, q);
             }
@@ -1340,38 +1329,48 @@ void parse_polymarket_events(const json &doc, json &s, const std::string &fetche
     }
 }
 void parse_kalshi_markets(const json &doc, json &s, const std::string &fetched) {
-    static const std::regex event_pattern(R"(^KXNBAGAME-[0-9]{2}[A-Z]{3}[0-9]{2}([A-Z]{6})$)");
-    for (const auto &market : doc.value("markets", json::array())) {
-        if (!market.is_object())
-            continue;
-        const auto status = market.value("status", "");
-        if (status != "active" && status != "open")
-            continue;
+    static const std::regex pattern(R"(^KXNBAGAME-[0-9]{2}[A-Z]{3}[0-9]{2}([A-Z]{6})$)");
+    if (!doc.is_object() || !doc.contains("markets") || !doc["markets"].is_array()) return;
+    for (const auto &m : doc["markets"]) {
+        if (!m.is_object()) continue;
+        const auto status = string_field(m, "status");
+        if (status != "active" && status != "open") continue;
         std::smatch match;
-        const auto event_ticker = market.value("event_ticker", "");
-        if (!std::regex_match(event_ticker, match, event_pattern))
-            continue;
+        const auto event = string_field(m, "event_ticker"), ticker = string_field(m, "ticker");
+        if (!std::regex_match(event, match, pattern) || ticker.rfind(event + "-", 0) != 0) continue;
         const auto pair = match[1].str();
-        const auto away = canonical_team(pair.substr(0, 3)), home = canonical_team(pair.substr(3, 3));
-        const auto ticker = market.value("ticker", "");
-        const auto dash = ticker.rfind('-');
-        if (dash == std::string::npos)
-            continue;
-        const auto winner = canonical_team(ticker.substr(dash + 1));
-        if (winner != home && winner != away)
-            continue;
-        const json *game = find_game(s, home, away);
-        if (!game || !within_days(game->value("startsAt", ""), market.value("occurrence_datetime", ""), 2))
-            continue;
-        // Traded probability: prefer the two-sided midpoint, else the last trade.
-        const double bid = number(market.value("yes_bid_dollars", json()), -1),
-                     ask = number(market.value("yes_ask_dollars", json()), -1);
-        double price =
-            (bid > 0 && ask > bid) ? (bid + ask) / 2 : number(market.value("last_price_dollars", json()), -1);
-        if (price <= 0.01 || price >= 0.99)
-            continue;
-        auto q = external_moneyline(*game, winner, winner == home ? "home" : "away", "Kalshi", "kalshi",
-                                    fetched, "https://kalshi.com/markets/kxnbagame");
+        const auto away = canonical_team(pair.substr(0,3)), home = canonical_team(pair.substr(3,3));
+        const auto winner = canonical_team(ticker.substr(event.size() + 1));
+        if (winner != home && winner != away) continue;
+        auto game = nearest_exchange_game(s, home, away, clean_timestamp(string_field(m, "occurrence_datetime")));
+        if (!game && string_field(m, "occurrence_datetime").empty()) {
+            // Standard market responses may omit occurrence_datetime. Use the
+            // structured event ticker's Eastern game date, never settlement/close time.
+            const std::map<std::string, std::string> months = {{"JAN","01"},{"FEB","02"},{"MAR","03"},
+                {"APR","04"},{"MAY","05"},{"JUN","06"},{"JUL","07"},{"AUG","08"},{"SEP","09"},
+                {"OCT","10"},{"NOV","11"},{"DEC","12"}};
+            const auto month = months.find(event.substr(12,3));
+            if (month != months.end()) {
+                const auto date = "20" + event.substr(10,2) + month->second + event.substr(15,2);
+                for (const auto &candidate : s["games"])
+                    if (candidate.value("home", "") == home && candidate.value("away", "") == away &&
+                        daily_lineup_date_token(parse_time(candidate.value("startsAt", ""))) == date) {
+                        if (game) { game = nullptr; break; } // Ambiguous same-day doubleheader.
+                        game = &candidate;
+                    }
+            }
+        }
+        if (!game) continue;
+        record_exchange_market(s, {{"id", "kalshi:" + ticker}, {"marketId", ticker}, {"provider", "kalshi"},
+            {"gameId", (*game)["id"]}, {"label", string_field(m, "title", winner + " win")},
+            {"volume", nonnegative_field(m, "volume_fp", "volume")}, {"volume24h", nonnegative_field(m, "volume_24h_fp", "volume_24h")},
+            {"openInterest", nonnegative_field(m, "open_interest_fp", "open_interest")}, {"liquidity", nullptr},
+            {"unit", "contracts"}, {"observedAt", fetched}, {"demo", false}});
+        const double bid = number(m.value("yes_bid_dollars", json()), -1), ask = number(m.value("yes_ask_dollars", json()), -1);
+        const double price = bid > 0 && ask >= bid && ask < 1 ? (bid + ask) / 2 : number(m.value("last_price_dollars", json()), -1);
+        if (!std::isfinite(price) || price <= .01 || price >= .99) continue;
+        auto q = external_moneyline(*game, winner, winner == game->value("home", "") ? "home" : "away", "Kalshi", "kalshi",
+            fetched, "https://kalshi.com/markets/kxnbagame");
         q["oddsPercent"] = price * 100;
         q["americanOdds"] = nullptr;
         add_external_quote(s, q);
@@ -1573,251 +1572,12 @@ ContextGameMatch match_context_game(json &snapshot, const std::string &home, con
     }
     return best;
 }
-const json *match_upcoming_moneyline_game(const json &schedule, const std::string &home, const std::string &away,
-                                          long long source_time, bool &reversed) {
-    if (!schedule.is_object() || !schedule.contains("games") || !schedule["games"].is_array())
-        return nullptr;
-    const json *best = nullptr;
-    long long best_difference = std::numeric_limits<long long>::max();
-    for (const auto &candidate : schedule["games"]) {
-        if (!candidate.is_object() || string_field(candidate, "status", "upcoming") != "upcoming")
-            continue;
-        const auto candidate_home = sharpapi_team_abbr(string_field(candidate, "home"));
-        const auto candidate_away = sharpapi_team_abbr(string_field(candidate, "away"));
-        const bool direct = candidate_home == home && candidate_away == away;
-        const bool flipped = candidate_home == away && candidate_away == home;
-        if (!direct && !flipped)
-            continue;
-        const auto scheduled_time = parse_time(string_field(candidate, "startsAt"));
-        if (!scheduled_time || source_time <= 0)
-            continue;
-        const auto difference = std::llabs(scheduled_time - source_time);
-        if (difference <= 6 * 60 * 60 && difference < best_difference) {
-            best = &candidate;
-            best_difference = difference;
-            reversed = flipped;
-        }
-    }
-    return best;
-}
-void api2_event_teams(const json &event, std::string &home, std::string &away, std::string &home_key,
-                      std::string &away_key) {
-    home_key = text(event.value("homeParticipantKey", json()));
-    const auto participants = event.value("participants", json::array());
-    if (participants.is_array())
-        for (const auto &participant : participants) {
-            if (!participant.is_object())
-                continue;
-            auto name = string_field(participant, "name");
-            if (name.empty())
-                name = string_field(participant, "shortName");
-            const auto abbr = sharpapi_team_abbr(name);
-            if (abbr.empty())
-                continue;
-            const auto participant_key = text(participant.value("key", json()));
-            const auto alignment = normalize_name(string_field(participant, "alignment"));
-            if ((!home_key.empty() && participant_key == home_key) || alignment == "home") {
-                home = abbr;
-                home_key = participant_key.empty() ? home_key : participant_key;
-            } else if ((!home_key.empty() && !participant_key.empty()) || alignment == "away") {
-                away = abbr;
-                away_key = participant_key;
-            } else if (!home.empty() && home != abbr) {
-                away = abbr;
-                away_key = participant_key;
-            }
-        }
-    if (home.empty())
-        home = provider_team(event, "home");
-    if (away.empty())
-        away = provider_team(event, "away");
-}
-bool api2_full_game_segment(const std::string &segment) {
-    const auto value = normalize_name(segment);
-    return value.empty() || value == "full" || value == "fullgame" || value == "game" ||
-           value == "fullmatch" || value == "match" || value == "fulltime" || value == "regulation";
-}
-int api2_american_odds(double payout) {
-    if (!std::isfinite(payout))
-        return 0;
-    if (std::floor(payout) == payout && payout <= -100 && payout >= -100000)
-        return static_cast<int>(payout);
-    if (std::floor(payout) == payout && payout >= 100 && payout <= 50000)
-        return static_cast<int>(payout);
-    // OpenAPI calls this value `payout` but does not specify the odds convention.
-    // Accept only ordinary decimal prices; fractional/implied-return values are
-    // deliberately skipped instead of being guessed.
-    if (payout > 1.0 && payout <= 20.0) {
-        const double american = payout >= 2.0 ? (payout - 1.0) * 100.0 : -100.0 / (payout - 1.0);
-        if (!std::isfinite(american) || american < -100000 || american > 50000)
-            return 0;
-        const int rounded = static_cast<int>(std::lround(american));
-        return rounded <= -100 || rounded >= 100 ? rounded : 0;
-    }
-    return 0;
-}
 void set_external_context(json &game, const char *provider, json value) {
     if (!game.contains("externalContext") || !game["externalContext"].is_object())
         game["externalContext"] = json::object();
     game["externalContext"][provider] = std::move(value);
 }
 } // namespace
-bool sportsbook_api2_quota_allows(int current, int daily_limit, int reserve, int calls_needed) {
-    return current >= 0 && daily_limit > 0 && reserve >= 0 && calls_needed > 0 &&
-           daily_limit - current >= reserve + calls_needed;
-}
-std::string sportsbook_api2_nba_competition_key(const json &document) {
-    const json *competitions = provider_collection(document, {"competitions"});
-    if (!competitions && document.is_object() && document.contains("data"))
-        competitions = provider_collection(document["data"], {"competitions"});
-    if (!competitions)
-        return "";
-    std::string result;
-    each_provider_object(*competitions, [&](const json &competition, const std::string &) {
-        if (!result.empty())
-            return;
-        const auto name = normalize_name(string_field(competition, "name"));
-        const auto short_name = normalize_name(string_field(competition, "shortName"));
-        const auto slug = normalize_name(string_field(competition, "slug"));
-        const auto sport = normalize_name(string_field(competition, "sport"));
-        const bool nba = name == "nba" || name == "nationalbasketballassociation" || short_name == "nba" ||
-                         slug == "nba";
-        if (!nba || (!sport.empty() && sport != "basketball"))
-            return;
-        result = text(competition.value("key", json()));
-    });
-    return result;
-}
-std::vector<std::string> sportsbook_api2_match_event_keys(const json &document, const json &schedule) {
-    std::vector<std::string> result;
-    const json *events = provider_collection(document, {"events"});
-    if (!events)
-        return result;
-    std::set<std::string> seen;
-    each_provider_object(*events, [&](const json &event, const std::string &) {
-        const auto key = text(event.value("key", json()));
-        const auto start = provider_epoch(string_field(event, "startTime"));
-        std::string home, away, home_key, away_key;
-        api2_event_teams(event, home, away, home_key, away_key);
-        bool reversed = false;
-        if (key.empty() || home.empty() || away.empty() ||
-            !match_upcoming_moneyline_game(schedule, home, away, start, reversed))
-            return;
-        if (seen.insert(key).second)
-            result.push_back(key);
-    });
-    if (result.size() > 100)
-        result.resize(100);
-    return result;
-}
-int parse_sportsbook_api2_odds(const json &document, const json &schedule, json &snapshot,
-                               const std::string &fetched_at) {
-    const json *events = provider_collection(document, {"events"});
-    if (!events || !schedule.is_object() || !schedule.contains("games") || !schedule["games"].is_array())
-        return 0;
-    std::set<std::string> seen_quotes;
-    int imported = 0;
-    each_provider_object(*events, [&](const json &event, const std::string &) {
-        const auto event_start = provider_epoch(string_field(event, "startTime"));
-        std::string event_home, event_away, home_participant_key, away_participant_key;
-        api2_event_teams(event, event_home, event_away, home_participant_key, away_participant_key);
-        bool reversed = false;
-        const auto *game = match_upcoming_moneyline_game(schedule, event_home, event_away, event_start, reversed);
-        if (!game)
-            return;
-        const bool event_home_is_home = event_home == sharpapi_team_abbr(string_field(*game, "home"));
-        for (const auto &market : array_field(event.value("markets", json()))) {
-            if (!market.is_object())
-                continue;
-            const auto market_type = normalize_name(string_field(market, "type"));
-            if (!(market_type.find("moneyline") != std::string::npos || market_type == "ml" ||
-                  market_type == "h2h" || market_type == "matchwinner") ||
-                !api2_full_game_segment(string_field(market, "segment")))
-                continue;
-            const auto outcomes = market.value("outcomes", json());
-            auto import_outcome = [&](const std::string &source, const json &outcome) {
-                if (!outcome.is_object())
-                    return;
-                if (outcome.contains("live") && !outcome["live"].is_null() &&
-                    (!outcome["live"].is_boolean() || outcome["live"].get<bool>()))
-                    return;
-                const auto book_id = string_field(outcome, "source", source);
-                if (book_id.empty() || sharpapi_duplicate_exchange(book_id))
-                    return;
-                const double raw_payout = number(outcome.value("payout", json()),
-                                                 std::numeric_limits<double>::quiet_NaN());
-                const int american = api2_american_odds(raw_payout);
-                if (!american)
-                    return;
-                const auto participant = outcome.value("participant", json::object());
-                auto participant_key = text(outcome.value("participantKey", json()));
-                if (participant_key.empty())
-                    participant_key = text(market.value("participantKey", json()));
-                auto participant_name = string_field(participant, "name");
-                if (participant_name.empty())
-                    participant_name = string_field(participant, "shortName");
-                const auto selected_team = sharpapi_team_abbr(participant_name);
-                std::string side;
-                if (!participant_key.empty()) {
-                    if (!home_participant_key.empty() && participant_key == home_participant_key)
-                        side = event_home_is_home ? "home" : "away";
-                    else if (!away_participant_key.empty() && participant_key == away_participant_key)
-                        side = event_home_is_home ? "away" : "home";
-                }
-                if (side.empty() && selected_team == sharpapi_team_abbr(string_field(*game, "home")))
-                    side = "home";
-                else if (side.empty() && selected_team == sharpapi_team_abbr(string_field(*game, "away")))
-                    side = "away";
-                else if (side.empty()) {
-                    const auto outcome_type = normalize_name(string_field(outcome, "type"));
-                    if (outcome_type == "home" || outcome_type == "1")
-                        side = event_home_is_home ? "home" : "away";
-                    else if (outcome_type == "away" || outcome_type == "2")
-                        side = event_home_is_home ? "away" : "home";
-                }
-                if (side.empty())
-                    return;
-                auto observed = provider_epoch(string_field(outcome, "readAt"))
-                                    ? clean_timestamp(string_field(outcome, "readAt"))
-                                    : clean_timestamp(string_field(outcome, "lastFoundAt"));
-                if (!parse_time(observed))
-                    observed = fetched_at;
-                const auto team = game->value(side, "");
-                auto quote = external_moneyline(*game, team, side, sharpapi_book_name(book_id), "sportsbookapi2",
-                                                observed, "https://sportsbookapi.com/documentation/");
-                quote["americanOdds"] = american;
-                quote["payoutFormat"] = raw_payout >= 100 || raw_payout <= -100 ? "american" : "decimal-heuristic";
-                quote["id"] = quote_id(quote);
-                const auto id = quote.value("id", "");
-                if (id.empty() || !seen_quotes.insert(id).second)
-                    return;
-                const auto new_time = parse_time(quote.value("observedAt", ""));
-                bool older_than_existing = false;
-                for (const auto &existing : snapshot["quotes"])
-                    if (existing.value("id", "") == id) {
-                        const auto old_time = parse_time(existing.value("observedAt", ""));
-                        older_than_existing = old_time > 0 && (new_time <= 0 || new_time < old_time);
-                        break;
-                    }
-                // A two-hour-cadence adapter must not replace a fresher direct
-                // quote for the same book/selection with an older cached price.
-                if (!older_than_existing) {
-                    add_external_quote(snapshot, std::move(quote));
-                    ++imported;
-                }
-            };
-            if (outcomes.is_object()) {
-                for (const auto &book_outcomes : outcomes.items())
-                    for (const auto &outcome : array_field(book_outcomes.value()))
-                        import_outcome(book_outcomes.key(), outcome);
-            } else if (outcomes.is_array()) {
-                for (const auto &outcome : outcomes)
-                    import_outcome(string_field(outcome, "source"), outcome);
-            }
-        }
-    });
-    return imported;
-}
 int parse_nba_go_games(const json &document, json &snapshot, const std::string &fetched_at) {
     const json *games = provider_collection(document, {"data", "games", "response"});
     if (!games)
@@ -1944,52 +1704,6 @@ int parse_thesportsdb_schedule(const json &document, json &snapshot, const std::
                               {"city", string_field(raw, "strCity")},
                               {"homeScore", same_orientation ? home_score : away_score},
                               {"awayScore", same_orientation ? away_score : home_score},
-                              {"asOf", fetched_at},
-                              {"contextOnly", true}});
-        matched_ids.insert(match.game->value("id", ""));
-    });
-    return static_cast<int>(matched_ids.size());
-}
-int parse_sportscore_fixtures(const json &document, json &snapshot, const std::string &fetched_at) {
-    const auto sport = normalize_name(string_field(document, "sport"));
-    if (!sport.empty() && sport != "basketball")
-        return 0;
-    const json *matches = provider_collection(document, {"matches", "fixtures", "data", "response"});
-    if (!matches)
-        return 0;
-    std::set<std::string> matched_ids;
-    each_provider_object(*matches, [&](const json &raw, const std::string &) {
-        auto home = provider_team(raw, "home");
-        auto away = provider_team(raw, "away");
-        if (home.empty() || away.empty() || home == away)
-            return;
-        std::string raw_time = string_field(raw, "time");
-        if (raw_time.empty())
-            raw_time = string_field(raw, "startTime");
-        if (raw_time.empty())
-            raw_time = string_field(raw, "start_time");
-        if (raw_time.empty())
-            raw_time = string_field(raw, "kickoff");
-        const auto start = provider_epoch(raw_time);
-        std::string raw_date = string_field(raw, "date");
-        if (raw_date.empty())
-            raw_date = raw_time;
-        const auto date = provider_date_token(raw_date);
-        const auto match = match_context_game(snapshot, home, away, date, start, 12 * 60 * 60);
-        if (!match.game)
-            return;
-        const bool same_orientation = !match.reversed;
-        auto home_score = optional_score(raw.value("home_score", raw.value("homeScore", json())));
-        auto away_score = optional_score(raw.value("away_score", raw.value("awayScore", json())));
-        if (!same_orientation)
-            std::swap(home_score, away_score);
-        set_external_context(*match.game, "sportScore",
-                             {{"eventId", string_field(raw, "slug", text(raw.value("id", json())))},
-                              {"status", string_field(raw, "status")},
-                              {"statusText", string_field(raw, "status_text")},
-                              {"time", raw_time},
-                              {"homeScore", home_score},
-                              {"awayScore", away_score},
                               {"asOf", fetched_at},
                               {"contextOnly", true}});
         matched_ids.insert(match.game->value("id", ""));
@@ -3054,19 +2768,56 @@ json scrape_saved_html(const std::string &html, const std::string &player, const
               {{{"name", player}, {"team", canonical_team(team)}, {"logs", logs}, {"injury", "Unknown"}}})}});
 }
 
-PublicFeeds::PublicFeeds(std::filesystem::path path) : cache_dir_(std::move(path)) {
+bool valid_feed_payload(const std::string &url, const json &data) {
+    auto array = [&](const char *key) { return data.is_object() && data.contains(key) && data[key].is_array(); };
+    if (data.is_object()) {
+        for (const auto *key : {"error", "errors"})
+            if (data.contains(key) && !data[key].is_null() && !data[key].empty()) return false;
+        if (data.value("success", json(true)) == false) return false;
+    }
+    if (url.find("https://gamma-api.polymarket.com/") == 0 ||
+        url.find("https://data-api.polymarket.com/") == 0 ||
+        url.find("https://guest.api.arcadia.pinnacle.com/") == 0) return data.is_array();
+    if (url.find("https://external-api.kalshi.com/") == 0) return array("markets");
+    if (url.find("https://site.api.espn.com/") == 0) {
+        if (url.find("/scoreboard") != std::string::npos) return array("events");
+        if (url.find("/roster") != std::string::npos) return array("athletes");
+        return data.is_object() && data.contains("boxscore") && data["boxscore"].is_object();
+    }
+    if (url.find("https://stats.nba.com/stats/") == 0)
+        return data.is_object() && ((data.contains("resultSets") && data["resultSets"].is_structured()) ||
+                                   (data.contains("resultSet") && data["resultSet"].is_object()));
+    if (url.find("todaysScoreboard_00.json") != std::string::npos)
+        return data.is_object() && data.contains("scoreboard") && data["scoreboard"].is_object() &&
+               data["scoreboard"].contains("games") && data["scoreboard"]["games"].is_array();
+    if (url.find("scheduleLeagueV2.json") != std::string::npos)
+        return data.is_object() && data.contains("leagueSchedule") && data["leagueSchedule"].is_object();
+    if (url.find("odds_todaysGames.json") != std::string::npos) return array("games");
+    if (api_basketball_host(url)) return array("response") || (data.is_object() && data.contains("response") && data["response"].is_object());
+    if (sharpapi_host(url)) return array("data");
+    return data.is_structured(); // Older context-only adapters retain their parser-specific guards.
+}
+PublicFeeds::PublicFeeds(std::filesystem::path path, Transport transport)
+    : transport_(transport ? transport : public_get), throttle_(!transport), cache_dir_(std::move(path)) {
     std::filesystem::create_directories(cache_dir_);
 }
 FeedResponse PublicFeeds::get(
     const std::string &url, int ttl, int max_stale, int failed_retry_seconds,
     const std::function<bool(const std::string &, std::string &)> &may_request) {
     FeedResponse response;
+    if (!allowed_data_url(url)) { response.error = "Source removed or outside the fixed allowlist"; return response; }
+    failed_retry_seconds = std::max(60, failed_retry_seconds);
+    const auto host = url.substr(0, url.find('/', 8));
+    const auto host_path = cache_dir_ / ("host-" + stable_id(host) + ".json");
+    const auto host_state = read_small_json(host_path);
+    const auto blocked_until = parse_time(host_state.value("retryAt", ""));
     if (cancelled_ && cancelled_->load()) {
         response.error = "Refresh cancelled";
         return response;
     }
     const auto path = cache_dir_ / (stable_id(url) + ".json");
     const auto retry_path = cache_dir_ / (stable_id(url) + ".retry.json");
+    const auto previous_failure = read_small_json(retry_path);
     json cache;
     try {
         if (std::filesystem::exists(path) && std::filesystem::file_size(path) < MAX_RESPONSE + 1024) {
@@ -3077,7 +2828,8 @@ FeedResponse PublicFeeds::get(
         cache = nullptr;
     }
     const auto age = cache.is_object() ? now_seconds() - parse_time(cache.value("fetchedAt", "")) : 1LL << 60;
-    const bool matching_cache = cache.is_object() && cache.value("url", "") == url && age >= 0;
+    const bool matching_cache = cache.is_object() && cache.value("url", "") == url && age >= 0 &&
+        valid_feed_payload(url, cache.value("body", json()));
     if (matching_cache && age < ttl) {
         response.data = cache.value("body", json());
         response.fetched_at = cache.value("fetchedAt", "");
@@ -3096,7 +2848,8 @@ FeedResponse PublicFeeds::get(
         const auto failed = read_small_json(retry_path);
         const auto failed_at = failed.value("attemptedAt", "");
         const auto failed_age = now_seconds() - parse_time(failed_at);
-        if (failed.value("url", "") == url && failed_age >= 0 && failed_age < failed_retry_seconds) {
+        const auto retry_after = std::max(failed_retry_seconds, failed.value("retrySeconds", 0));
+        if (failed.value("url", "") == url && failed_age >= 0 && failed_age < retry_after) {
             response.status = failed.value("status", 0);
             response.fetched_at = failed_at;
             response.error = failed.value("error", "Previous request failed; retry is deferred.");
@@ -3104,6 +2857,12 @@ FeedResponse PublicFeeds::get(
             use_stale_cache();
             return response;
         }
+    }
+    if (blocked_until > now_seconds()) {
+        response.status = host_state.value("status", 0);
+        response.error = "Provider host circuit open until " + host_state.value("retryAt", "") +
+            "; previous access/rate-limit or repeated transport failure. No alternate route attempted.";
+        use_stale_cache(); return response;
     }
     std::string permission_error;
     if (requests_ >= MAX_REQUESTS_PER_REFRESH) {
@@ -3114,21 +2873,13 @@ FeedResponse PublicFeeds::get(
     } else if (requests_ >= MAX_REQUESTS_PER_REFRESH) {
         response.error = "Per-refresh public-source request budget reached";
     } else {
-        if (requests_ > 0)
+        if (throttle_ && requests_ > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         ++requests_;
         if (api_basketball_host(url)) {
             ++api_basketball_current_;
             api_basketball_quota_checked_at_ = now_iso();
             save_api_basketball_quota();
-        }
-        if (sportsbook_api2_host(url)) {
-            if (sportsbook_api2_quota_date_ != now_iso().substr(0, 10)) {
-                sportsbook_api2_quota_date_ = now_iso().substr(0, 10);
-                sportsbook_api2_current_ = 0;
-            }
-            ++sportsbook_api2_current_;
-            save_sportsbook_api2_quota();
         }
         // Record an attempt before I/O. A crash or transport timeout must not
         // turn the one-daily odds poll into a tight retry loop on next startup.
@@ -3138,16 +2889,21 @@ FeedResponse PublicFeeds::get(
                                          {"status", 0},
                                          {"error", "Request outcome is unknown; retry is deferred to the "
                                                     "provider refresh interval."}});
-        auto http = public_get(url);
+        auto http = transport_(url);
         response.status = http.status;
         response.error = http.error;
         if (http.status == 200 && http.error.empty()) {
             try {
                 response.data = json::parse(http.body);
+                if (!valid_feed_payload(url, response.data)) {
+                    response.data = nullptr;
+                    throw std::runtime_error("Unsupported provider contract");
+                }
                 response.fetched_at = now_iso();
                 json entry = {{"url", url}, {"fetchedAt", response.fetched_at}, {"body", response.data}};
-                std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-                stream << entry.dump();
+                write_json_file(path, entry);
+                std::error_code host_error;
+                std::filesystem::remove(host_path, host_error);
                 if (api_basketball_host(url))
                     record_api_basketball_response(response.data);
                 if (failed_retry_seconds > 0) {
@@ -3156,11 +2912,19 @@ FeedResponse PublicFeeds::get(
                 }
                 return response;
             } catch (...) {
+                response.data = nullptr;
                 response.error = "Public source returned an unsupported/non-JSON response";
             }
         }
+        const int failures = std::min(10, previous_failure.value("failures", 0) + 1);
+        const int delay = std::max(failed_retry_seconds, std::min(21600,
+            (response.status == 404 ? 21600 : response.status == 403 || response.status == 429 ? 900 : 60) * (1 << (failures - 1))));
+        const int host_failures = std::min(10, host_state.value("failures", 0) + 1);
+        if (response.status == 403 || response.status == 429 || response.status == 0)
+            write_json_file(host_path, {{"status", response.status}, {"failures", host_failures},
+                {"retryAt", iso_at(now_seconds() + (response.status != 0 || host_failures >= 2 ? std::max(300, delay) : 0))}});
         if (failed_retry_seconds > 0)
-            write_json_file(retry_path, {{"url", url},
+            write_json_file(retry_path, {{"url", url}, {"failures", failures}, {"retrySeconds", delay},
                                          {"attemptedAt", now_iso()},
                                          {"status", response.status},
                                          {"error", response.error.empty() ? "Provider request failed." : response.error}});
@@ -3284,43 +3048,6 @@ void PublicFeeds::save_api_basketball_quota() {
                                 api_basketball_current_ >= 0},
                      {"error", api_basketball_quota_error_}});
 }
-bool PublicFeeds::ensure_sportsbook_api2_quota(int calls_needed, std::string &reason) {
-    if (rapidapi_key().empty()) {
-        reason = "Set RAPIDAPI_KEY in the application process environment to enable Sportsbook API2. "
-                 "The credential is never stored in the repository or cache.";
-        return false;
-    }
-    const auto today = now_iso().substr(0, 10);
-    if (!sportsbook_api2_quota_loaded_ || sportsbook_api2_quota_date_ != today) {
-        const auto saved = read_small_json(cache_dir_ / "sportsbook-api2-usage.json");
-        sportsbook_api2_quota_date_ = today;
-        sportsbook_api2_current_ = saved.value("date", "") == today
-                                       ? static_cast<int>(number(saved.value("current", json(0)), 0))
-                                       : 0;
-        if (sportsbook_api2_current_ < 0)
-            sportsbook_api2_current_ = 0;
-        sportsbook_api2_quota_loaded_ = true;
-    }
-    if (!sportsbook_api2_quota_allows(sportsbook_api2_current_, SPORTSBOOK_API2_DAILY_LIMIT,
-                                      SPORTSBOOK_API2_RESERVE_REQUESTS, calls_needed)) {
-        const auto remaining = std::max(0, SPORTSBOOK_API2_DAILY_LIMIT - sportsbook_api2_current_);
-        reason = "Sportsbook API2 daily quota guard: " + std::to_string(remaining) + " of " +
-                 std::to_string(SPORTSBOOK_API2_DAILY_LIMIT) + " requests remain; Edgecourt needs " +
-                 std::to_string(calls_needed) + " and leaves " +
-                 std::to_string(SPORTSBOOK_API2_RESERVE_REQUESTS) +
-                 " for other RapidAPI use. The lower published 50/day limit is being honored.";
-        return false;
-    }
-    return true;
-}
-void PublicFeeds::save_sportsbook_api2_quota() {
-    write_json_file(cache_dir_ / "sportsbook-api2-usage.json",
-                    {{"date", sportsbook_api2_quota_date_},
-                     {"current", sportsbook_api2_current_},
-                     {"dailyLimit", SPORTSBOOK_API2_DAILY_LIMIT},
-                     {"reserved", SPORTSBOOK_API2_RESERVE_REQUESTS},
-                     {"updatedAt", now_iso()}});
-}
 void PublicFeeds::record_api_basketball_response(const json &document) {
     if (!document.is_object() || !document.contains("requests") || !document["requests"].is_object())
         return;
@@ -3350,36 +3077,41 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     // and discard every other source). Parse exceptions are contained per
     // source and reported on that source's card at the end of the refresh.
     std::map<std::string, std::string> parse_errors;
-    auto parse_guard = [&parse_errors](const std::string &source_id, auto &&fn) {
+    json s = empty_snapshot("live");
+    auto parse_guard = [&parse_errors, &s](const std::string &source_id, auto &&fn) {
+        const auto checkpoint = s;
         try {
             fn();
         } catch (const std::exception &e) {
+            s = checkpoint;
             parse_errors[source_id] = e.what();
         }
     };
-    json s = empty_snapshot("live");
-    s["players"] = previous.value("players", json::object());
-    s["teams"] = previous.value("teams", json::object());
+    if (previous.value("mode", "") == "live") {
+        s["players"] = previous.value("players", json::object());
+        s["teams"] = previous.value("teams", json::object());
+    }
     // The date window uses UTC dates so no local timezone assumption enters scheduled starts.
     // ESPN's site API rejects hyphenated date ranges with HTTP 400 ("Failed to get
     // events endpoint"), so the window is fetched one day at a time and merged by
     // event id (upsert_game deduplicates). Preseason, regular-season and postseason
     // events are all kept exactly as ESPN types them for each day.
     const auto day_urls = espn_scoreboard_day_urls(now_seconds() - 86400, now_seconds() + 7 * 86400);
+    const auto today_url = espn_scoreboard_day_urls(now_seconds(), now_seconds()).front();
     FeedResponse espn;
     int espn_days_ok = 0, espn_days_failed = 0;
     bool espn_contract_ok = false, espn_denied = false, espn_cached = false;
     for (const auto &url : day_urls) {
         if (cancelled_ && cancelled_->load())
             break;
-        auto day = get(url, 45, 0);
+        auto day = get(url, url == today_url ? 45 : 3600, 0);
         if (day.data.is_null()) {
             ++espn_days_failed;
             if (espn.error.empty())
                 espn.error = day.error;
             if (!espn.status)
                 espn.status = day.status;
-            if (day.status == 403 || day.status == 429)
+            if (day.status == 0 || day.status == 403 || day.status == 429)
                 espn_denied = true;
             continue;
         }
@@ -3484,34 +3216,102 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     // scheduled game (preseason included) are kept; these venues publish
     // probabilities/American prices, never player statistics, and their prices are
     // indicative exchange/book prices.
-    auto polymarket = get(
-        "https://gamma-api.polymarket.com/events?tag_slug=nba&active=true&closed=false&limit=100", 60, 300);
-    int polymarket_count = 0;
-    if (!polymarket.data.is_null()) {
-        parse_guard("polymarket", [&] {
+    // Bulk market discovery: up to three pages per exchange. Parse each page with
+    // its OWN retrieval time, so a cache hit can never become a fresh quote.
+    bool polymarket_discovery_partial = false;
+    for (const auto &provider : {std::string("polymarket"), std::string("kalshi")}) {
+        FeedResponse aggregate;
+        bool partial = false, any = false;
+        int count = 0, pages = 0;
+        std::string cursor;
+        std::set<std::string> cursors;
+        for (int page = 0; page < 3; ++page) {
+            const auto url = provider == "polymarket"
+                ? "https://gamma-api.polymarket.com/events?tag_slug=nba&active=true&closed=false&limit=100&offset=" + std::to_string(page * 100)
+                : "https://external-api.kalshi.com/trade-api/v2/markets?series_ticker=KXNBAGAME&status=open&limit=200" +
+                    (cursor.empty() ? "" : "&cursor=" + encode_query_component(cursor));
+            auto response = get(url, 60, 300, 60);
+            if (response.data.is_null()) {
+                aggregate.error = response.error; aggregate.status = response.status;
+                partial = any; break;
+            }
+            any = true; ++pages;
+            aggregate.data = json::object();
+            aggregate.cached = aggregate.cached || response.cached;
+            aggregate.stale = aggregate.stale || response.stale;
+            if (aggregate.fetched_at.empty() || response.fetched_at < aggregate.fetched_at)
+                aggregate.fetched_at = response.fetched_at;
             const auto before = s["quotes"].size();
-            parse_polymarket_events(polymarket.data, s, polymarket.fetched_at);
-            polymarket_count = static_cast<int>(s["quotes"].size() - before);
-        });
+            parse_guard(provider, [&] {
+                if (provider == "polymarket") parse_polymarket_events(response.data, s, response.fetched_at);
+                else parse_kalshi_markets(response.data, s, response.fetched_at);
+            });
+            count += static_cast<int>(s["quotes"].size() - before);
+            if (provider == "polymarket") {
+                if (response.data.size() < 100) break;
+            } else {
+                cursor = string_field(response.data, "cursor");
+                if (cursor.empty()) break;
+                if (cursor.size() > 1024 || !cursors.insert(cursor).second) { partial = true; break; }
+            }
+            if (page == 2) partial = true;
+        }
+        auto card = source(provider, provider == "polymarket" ? "Polymarket NBA prices + USDC volume" :
+            "Kalshi NBA prices + contract volume", aggregate, count,
+            "Keyless bulk exchange data; market-level volume is not sportsbook handle. "
+            "Up to three pages per refresh, cached 60 seconds. Fees and settlement differ from sportsbooks.");
+        card["pages"] = pages;
+        if (partial) { card["state"] = "partial"; card["message"] = card.value("message", "") +
+            " Discovery is incomplete: page cap, repeated cursor or provider failure. " + aggregate.error; }
+        if (provider == "polymarket") polymarket_discovery_partial = partial;
+        s["sources"].push_back(card);
     }
-    s["sources"].push_back(
-        source("polymarket", "Polymarket NBA game prices", polymarket, polymarket_count,
-               "Keyless public prediction-market moneylines (prices are traded "
-               "probabilities). Futures/spreads/totals are ignored; not a sportsbook price."));
-    auto kalshi = get(
-        "https://external-api.kalshi.com/trade-api/v2/markets?series_ticker=KXNBAGAME&status=open&limit=200",
-        60, 300);
-    int kalshi_count = 0;
-    if (!kalshi.data.is_null()) {
-        parse_guard("kalshi", [&] {
-            const auto before = s["quotes"].size();
-            parse_kalshi_markets(kalshi.data, s, kalshi.fetched_at);
-            kalshi_count = static_cast<int>(s["quotes"].size() - before);
-        });
+    // Preserve only previously observed real fills, never synthetic Demo records.
+    if (previous.value("mode", "") == "live")
+        for (const auto &trade : previous.value("whaleTrades", json::array()))
+            if (!trade.value("demo", false)) s["whaleTrades"].push_back(trade);
+    std::vector<std::string> conditions;
+    for (const auto &market : s["exchangeMarkets"])
+        if (market.value("provider", "") == "polymarket" && !market.value("outcomeTokens", json::object()).empty())
+            conditions.push_back(market.value("marketId", ""));
+    std::sort(conditions.begin(), conditions.end());
+    conditions.erase(std::unique(conditions.begin(), conditions.end()), conditions.end());
+    const auto available_markets = conditions.size();
+    // Rotate oversized discovery sets so the same first 40 markets cannot starve the rest.
+    if (conditions.size() > 40) {
+        const auto start = (now_seconds() / 60 * 40) % conditions.size();
+        std::rotate(conditions.begin(), conditions.begin() + start, conditions.end());
+        conditions.resize(40);
     }
-    s["sources"].push_back(source("kalshi", "Kalshi NBA game prices", kalshi, kalshi_count,
-                                  "Keyless public exchange market data; midpoint of bid/ask when "
-                                  "two-sided, else last trade. Fees/settlement differ from sportsbooks."));
+    int trade_pages = 0, trade_failures = 0;
+    bool trade_capped = available_markets > conditions.size() || polymarket_discovery_partial;
+    std::string trades_at;
+    for (size_t offset = 0; offset < conditions.size(); offset += 20) {
+        std::string ids;
+        for (size_t i = offset; i < std::min(offset + 20, conditions.size()); ++i)
+            ids += (ids.empty() ? "" : "%2C") + conditions[i];
+        for (int page = 0; page < 2; ++page) {
+            auto trades = get("https://data-api.polymarket.com/trades?market=" + ids +
+                "&takerOnly=true&filterType=CASH&filterAmount=1000&limit=500&offset=" + std::to_string(page * 500), 60, 300, 60);
+            if (trades.data.is_null()) { ++trade_failures; break; }
+            ++trade_pages;
+            if (trades_at.empty() || trades.fetched_at < trades_at) trades_at = trades.fetched_at;
+            parse_guard("polymarket-trades", [&] { parse_polymarket_trades(trades.data, s, trades.fetched_at); });
+            if (trades.data.size() < 500) break;
+            if (page == 1) trade_capped = true;
+        }
+    }
+    // Empty parse also prunes retained fills beyond the rolling 24h window.
+    parse_polymarket_trades(json::array(), s, now_iso());
+    s["whaleCoverage"] = {{"state", !trade_pages ? "unavailable" : trade_failures || trade_capped ? "partial" : "sampled"},
+        {"observedAt", trades_at}, {"pages", trade_pages}, {"matchedMarkets", available_markets},
+        {"requestedMarkets", conditions.size()}, {"capped", trade_capped}, {"failedRequests", trade_failures},
+        {"message", "Rolling 24h observed public taker fills of at least 1,000 USDC, not a complete trade archive. "
+                    "At most 40 markets and four 500-row requests per refresh. Identical fill rows are deduplicated. "
+                    "Older retained fills are observations, not current positions. Kalshi exposes no public wallet identities."}};
+    s["sources"].push_back({{"id", "polymarket-trades"}, {"label", "Polymarket public large trades"},
+        {"state", s["whaleCoverage"]["state"]}, {"updatedAt", trades_at}, {"count", s["whaleTrades"].size()},
+        {"message", s["whaleCoverage"]["message"]}});
     if (sharpapi_key().empty()) {
         s["sources"].push_back({{"id", "sharpapi"},
                                 {"label", "SharpAPI NBA sportsbook moneylines"},
@@ -3715,12 +3515,10 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
             const auto league_base = "https://guest.api.arcadia.pinnacle.com/0.1/leagues/" + league_id;
             auto matchups = get(league_base + "/matchups?brandId=0", 120, 600);
             // Pinnacle's own site and public integrations read straight
-            // markets at /markets/straight; the /period/0 route this build
-            // requested before now answers 404. Keep the old route as a
-            // fallback so a future route change degrades honestly.
+            // markets at /markets/straight. The obsolete /period/0 fallback
+            // has been removed; access failures never trigger alternate routes.
             auto straight = get(league_base + "/markets/straight?brandId=0", 45, 0);
-            if (straight.data.is_null())
-                straight = get(league_base + "/markets/straight/period/0?brandId=0", 45, 0);
+
             pinnacle_state = straight;
             if (!matchups.data.is_null() && !straight.data.is_null()) {
                 pinnacle_stage.clear();
@@ -3752,104 +3550,10 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     const bool has_upcoming_games = std::any_of(s["games"].begin(), s["games"].end(), [](const json &game) {
         return game.is_object() && string_field(game, "status", "upcoming") == "upcoming";
     });
-    const bool has_scheduled_or_live_games = std::any_of(s["games"].begin(), s["games"].end(), [](const json &game) {
-        const auto status = string_field(game, "status", "upcoming");
-        return game.is_object() && (status == "upcoming" || status == "live");
-    });
-    if (rapidapi_key().empty()) {
-        s["sources"].push_back({{"id", "sportsbook-api2"},
-                                {"label", "Sportsbook API2 NBA moneylines"},
-                                {"state", "idle"},
-                                {"updatedAt", ""},
-                                {"count", 0},
-                                {"message", "Optional keyed odds feed. Set RAPIDAPI_KEY in the "
-                                            "application process environment and confirm the exact RapidAPI "
-                                            "host from its generated code snippet in RAPIDAPI_HOST; neither "
-                                            "value is stored in source code, URLs or cache."}});
-    } else if (!sportsbook_api2_host_confirmed()) {
-        s["sources"].push_back({{"id", "sportsbook-api2"},
-                                {"label", "Sportsbook API2 NBA moneylines"},
-                                {"state", "idle"},
-                                {"updatedAt", ""},
-                                {"count", 0},
-                                {"message", std::string("RAPIDAPI_KEY is present, but no request was made. "
-                                                         "Compare the RapidAPI host in its generated code "
-                                                         "snippet; set RAPIDAPI_HOST to exactly '") +
-                                                SPORTSBOOK_API2_RAPIDAPI_HOST + "' only if it matches."}});
-    } else if (!has_upcoming_games) {
-        s["sources"].push_back({{"id", "sportsbook-api2"},
-                                {"label", "Sportsbook API2 NBA moneylines"},
-                                {"state", "idle"},
-                                {"updatedAt", ""},
-                                {"count", 0},
-                                {"message", "No upcoming NBA games are available to match. The odds "
-                                            "request is deferred to conserve the lower published daily "
-                                            "allowance."}});
-    } else {
-        auto allow_sportsbook_request = [this](const std::string &, std::string &reason) {
-            return ensure_sportsbook_api2_quota(1, reason);
-        };
-        FeedResponse sportsbook_api2;
-        int sportsbook_api2_count = 0;
-        auto competitions = get("https://sportsbook-api2.p.rapidapi.com/v0/competitions?includeInstances=false",
-                                SPORTSBOOK_API2_COMPETITIONS_CACHE_SECONDS, 0,
-                                6 * 60 * 60, allow_sportsbook_request);
-        sportsbook_api2 = competitions;
-        if (!competitions.data.is_null()) {
-            const auto competition_key = sportsbook_api2_nba_competition_key(competitions.data);
-            if (competition_key.empty()) {
-                sportsbook_api2.data = nullptr;
-                sportsbook_api2.error = "Sportsbook API2 returned no NBA competition key; no odds request was made.";
-            } else {
-                const auto from = iso_at(now_seconds()).substr(0, 10) + "T00:00:00Z";
-                const auto to = iso_at(now_seconds() + 8 * 86400).substr(0, 10) + "T23:59:59Z";
-                const auto events_url =
-                    "https://sportsbook-api2.p.rapidapi.com/v0/competitions/" +
-                    encode_query_component(competition_key) + "/events?eventType=MATCH&startTimeFrom=" +
-                    encode_query_component(from) + "&startTimeTo=" + encode_query_component(to);
-                auto events = get(events_url, SPORTSBOOK_API2_EVENTS_CACHE_SECONDS, 0,
-                                  SPORTSBOOK_API2_EVENTS_CACHE_SECONDS, allow_sportsbook_request);
-                sportsbook_api2 = events;
-                if (!events.data.is_null()) {
-                    std::vector<std::string> event_keys;
-                    parse_guard("sportsbook-api2", [&] {
-                        event_keys = sportsbook_api2_match_event_keys(events.data, s);
-                    });
-                    if (!event_keys.empty()) {
-                        std::string odds_url =
-                            "https://sportsbook-api2.p.rapidapi.com/v0/events/?returnType=array&"
-                            "includeParticipants=true&includeCompetitions=false&includeLinks=false";
-                        for (const auto &event_key : event_keys)
-                            odds_url += "&eventKeys=" + encode_query_component(event_key);
-                        auto odds = get(odds_url, SPORTSBOOK_API2_ODDS_CACHE_SECONDS, 0,
-                                        SPORTSBOOK_API2_ODDS_CACHE_SECONDS, allow_sportsbook_request);
-                        sportsbook_api2 = odds;
-                        if (!odds.data.is_null())
-                            parse_guard("sportsbook-api2", [&] {
-                                sportsbook_api2_count = parse_sportsbook_api2_odds(
-                                    odds.data, s, s, odds.fetched_at);
-                            });
-                    } else {
-                        sportsbook_api2.error =
-                            "No upcoming Sportsbook API2 NBA events matched the published schedule; "
-                            "the detail/odds request was skipped.";
-                    }
-                }
-            }
-        }
-        auto sportsbook_api2_source = source(
-            "sportsbook-api2", "Sportsbook API2 NBA moneylines", sportsbook_api2, sportsbook_api2_count,
-            "Schedule-matched full-game pregame sportsbook moneylines; odds refreshed every 2 hours, "
-            "event list every 6 hours, competition list daily. Uses the lower published 50-requests/day "
-            "limit with ten calls reserved for other RapidAPI use. Provider `payout` units are not "
-            "documented: only plausible American prices or decimal prices (1–20) are imported; decimal "
-            "conversion is explicitly heuristic and must be checked against a sanitized live sample. "
-            "Indicative prices only; confirm at the sportsbook.");
-        if (!sportsbook_api2.data.is_null() && sportsbook_api2.error.size())
-            sportsbook_api2_source["message"] =
-                std::string(sportsbook_api2_source.value("message", "")) + " " + sportsbook_api2.error;
-        s["sources"].push_back(std::move(sportsbook_api2_source));
-    }
+    s["sources"].push_back({{"id", "sportsbook-api2"}, {"label", "Sportsbook API2 (removed)"},
+        {"state", "idle"}, {"updatedAt", ""}, {"count", 0},
+        {"message", "Removed from active providers: inferred API host and undocumented payout units. "
+                    "No requests or credentials are sent, even if RAPIDAPI_KEY is set."}});
     const auto current_eastern_date = daily_lineup_date_token(now_seconds());
     const auto nba_go_date = current_eastern_date.size() == 8
                                  ? current_eastern_date.substr(0, 4) + "-" + current_eastern_date.substr(4, 2) +
@@ -3915,32 +3619,10 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
             "score are context only and never affect probabilities. Cached for 6 hours (at most four "
             "polls/day); V1's key-in-URL format is not used."));
     }
-    if (!has_scheduled_or_live_games) {
-        s["sources"].push_back({{"id", "sportscore"},
-                                {"label", "SportScore basketball fixtures"},
-                                {"state", "idle"},
-                                {"updatedAt", ""},
-                                {"count", 0},
-                                {"message", "No scheduled or live NBA games are available to match; no "
-                                            "fixture request was made. SportScore's public tier is keyless."}});
-    } else {
-        const auto sportscore_date = iso_at(now_seconds()).substr(0, 10);
-        const auto sportscore_url = "https://sportscore.com/api/v1/fixtures/?sport=basketball&date=" +
-                                    sportscore_date + "&limit=200";
-        auto sportscore = get(sportscore_url, SPORTSCORE_CACHE_SECONDS, 0, SPORTSCORE_CACHE_SECONDS);
-        int sportscore_count = 0;
-        if (!sportscore.data.is_null())
-            parse_guard("sportscore", [&] {
-                sportscore_count = parse_sportscore_fixtures(sportscore.data, s, sportscore.fetched_at);
-            });
-        s["sources"].push_back(source(
-            "sportscore", "SportScore basketball fixtures", sportscore, sportscore_count,
-            std::string("Keyless fixtures/scores joined to NBA games by team and time; an optional "
-                        "SPORTSCORE_KEY is sent only as X-Api-Key to SportScore. Context only, never a "
-                        "probability input. One request at most every 6 hours (four/day), well below the "
-                        "documented ~10,000 requests/24h/IP tier. A visible dofollow attribution link is "
-                        "provided wherever SportScore data is shown.")));
-    }
+    s["sources"].push_back({{"id", "sportscore"}, {"label", "SportScore (removed)"},
+        {"state", "idle"}, {"updatedAt", ""}, {"count", 0},
+        {"message", "Removed: the configured general fixtures route and NBA payload contract were not established. "
+                    "No requests or credentials are sent."}});
     auto season = nba_season(now_seconds());
     auto date_from = iso_at(now_seconds() - 210 * 86400).substr(0, 10);
     const auto player_url = [&](const std::string &year) {
@@ -4267,8 +3949,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
     // in-play eligibility, rosters are hourly-cached context. Either can be
     // cut short by the request budget without starving the feeds above.
     int summaries = 0;
-    if (!s["games"].empty())
-        for (const auto &game : s["games"]) {
+    const auto summary_games = s["games"];
+    if (!summary_games.empty())
+        for (const auto &game : summary_games) {
             if (game.value("status", "") != "live" || !game.contains("espnId") || summaries >= 6)
                 continue;
             auto summary = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=" +
@@ -4343,7 +4026,7 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
         card["state"] = "unavailable";
         card["count"] = 0;
         card["message"] = "The source responded, but its payload could not be parsed (" + failed->second +
-                          "). It contributed no data this refresh; other sources were unaffected.";
+                          "). The failing parse was rolled back; earlier valid pages and other sources were retained.";
     }
     s["generatedAt"] = now_iso();
     return s;
