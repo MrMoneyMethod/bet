@@ -33,7 +33,7 @@ No API keys or sportsbook credentials are requested. Keyless public access is no
 | User saved HTML | Local data extraction | Embedded ESPN/normalized JSON; Basketball Reference-style game-log tables | No browsing, crawling or script execution |
 | Polymarket moneylines | gamma-api.polymarket.com (keyless) | Game-winner traded probabilities only; futures/spreads/totals ignored | Indicative exchange price; no liquidity/size guarantee |
 | Kalshi moneylines | external-api.kalshi.com trade API (keyless) | NBA game markets matched by structured tickers; bid/ask midpoint else last trade | Indicative exchange price; names in titles truncate, tickers do not |
-| Pinnacle moneylines | guest.api.arcadia.pinnacle.com (anonymous guest feed) | Exact American prices; game totals never mapped to team totals | Undocumented endpoint; may change or block |
+| Pinnacle moneylines | guest.api.arcadia.pinnacle.com (anonymous guest feed; requests carry the guest key Pinnacle publishes to its public website — keyless calls now return 404 — plus `?brandId=0`) | Exact American prices; game totals never mapped to team totals | Undocumented endpoint; may change, rotate its key or block |
 
 The full catalog of investigated keyless sources (probed endpoints, open datasets,
 free-key exclusions and dead ends) is in [KEYLESS_SOURCES.md](KEYLESS_SOURCES.md).
@@ -77,7 +77,7 @@ The historical SBR reference was reviewed for data/odds separation and parsing p
 - HTTPS GET only to a fixed source hostname allowlist; no custom ports, credentials, localhost targets or redirects.
 - Descriptive application user agent; Windows certificate validation remains enabled.
 - Timeouts, 16 MB source-response cap, 4 MB imports, 64 network requests per refresh maximum (raised from 36 for the official/league expansion; cached responses do not consume the budget) and at least 250 ms between source requests.
-- Cache avoids refetching season stats/rosters every score refresh. Within the request budget, the schedule and the public moneyline venues are fetched before player/team stats, live summaries and rosters, so enrichment traffic cannot starve prices. The official/league season datasets sit behind those priorities with 6-hour caches, so a cold refresh may fill them progressively rather than all at once.
+- Cache avoids refetching season stats/rosters every score refresh. Within the request budget, the schedule and the public moneyline venues are fetched first; every single-request league-wide feed (player/team logs, standings, Four Factors, the official/league datasets) comes next; the per-game/per-team fan-out (live summaries, then rosters — capped at 10 roster network fetches per refresh) runs last, so budget exhaustion can only ever starve roster refresh, never a league-wide feed. Season datasets carry 6-hour caches, so a cold refresh may still fill them progressively rather than all at once.
 - Failed/blocked/rate-limited sources are surfaced in **Model lab → Data sources**. The code does not retry through bypasses.
 - Desktop public-data requests originate on your computer, not in browser JavaScript, avoiding provider CORS requirements.
 - Model price/stat freshness is stricter than cache availability. A cached history response does not make an old price fresh.

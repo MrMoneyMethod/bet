@@ -307,7 +307,19 @@ json App::import(const json &request) {
 void App::worker_loop() {
     std::unique_lock<std::mutex> lock(mutex_);
     while (!stopping_) {
-        condition_.wait_for(lock, std::chrono::seconds(60), [this] { return stopping_ || requested_; });
+        // Live workspaces auto-refresh every 60 seconds, measured from the
+        // start of the previous refresh so a slow refresh cannot stretch the
+        // cadence beyond 60s + its own duration. Wake earlier when the next
+        // cycle comes due or a manual refresh is requested.
+        auto wait = std::chrono::seconds(60);
+        if (snapshot_.value("mode", "demo") == "live" && feeds_enabled_ &&
+            last_refresh_start_.time_since_epoch().count()) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - last_refresh_start_);
+            wait = elapsed >= std::chrono::seconds(60) ? std::chrono::seconds(1)
+                                                       : std::chrono::seconds(60) - elapsed;
+        }
+        condition_.wait_for(lock, wait, [this] { return stopping_ || requested_; });
         if (stopping_)
             break;
         if (snapshot_.value("mode", "demo") != "live") {
@@ -325,9 +337,15 @@ void App::worker_loop() {
             rebuild_locked();
             continue;
         }
-        requested_ = false;
         if (!feeds_enabled_)
             continue;
+        const bool due =
+            requested_ || !last_refresh_start_.time_since_epoch().count() ||
+            std::chrono::steady_clock::now() - last_refresh_start_ >= std::chrono::seconds(60);
+        if (!due)
+            continue;
+        requested_ = false;
+        last_refresh_start_ = std::chrono::steady_clock::now();
         auto generation = generation_;
         auto previous = snapshot_;
         snapshot_["refreshing"] = true;

@@ -276,12 +276,27 @@ std::vector<std::string> espn_scoreboard_day_urls(long long first_epoch, long lo
     }
     return urls;
 }
+std::vector<std::pair<std::string, std::string>> public_request_headers(const std::string &url) {
+    std::vector<std::pair<std::string, std::string>> headers = {
+        {"Accept", "application/json, text/html;q=0.9"}, {"Referer", "https://www.nba.com/"}};
+    if (url.rfind("https://guest.api.arcadia.pinnacle.com/", 0) == 0) {
+        // Pinnacle's guest tier (the API its public website calls) answers
+        // 401/404 without the site key. This is the key Pinnacle publishes to
+        // every anonymous website visitor (pinnacle.com/config/app.json,
+        // stable since 2019) — not an account, login or user credential. If
+        // Pinnacle rotates it, the source reports unavailable honestly.
+        headers[1].second = "https://www.pinnacle.com/";
+        headers.push_back({"X-API-Key", "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"});
+    }
+    return headers;
+}
 HttpResponse public_get(const std::string &url) {
     HttpResponse response;
     if (!allowed_data_url(url)) {
         response.error = "Data URL is outside the fixed public-source allowlist";
         return response;
     }
+    const auto request_headers = public_request_headers(url);
 #ifdef _WIN32
     auto wide = [](const std::string &s) {
         int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -320,10 +335,12 @@ HttpResponse public_get(const std::string &url) {
         DWORD decompress = WINHTTP_DECOMPRESSION_FLAG_GZIP | WINHTTP_DECOMPRESSION_FLAG_DEFLATE;
         WinHttpSetOption(request, WINHTTP_OPTION_DECOMPRESSION, &decompress, sizeof(decompress));
     }
+    std::wstring header_block;
+    for (const auto &header : request_headers)
+        header_block += wide(header.first + ": " + header.second + "\r\n");
     if (request &&
-        WinHttpSendRequest(request,
-                           L"Accept: application/json, text/html;q=0.9\r\nReferer: https://www.nba.com/\r\n",
-                           static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpSendRequest(request, header_block.c_str(), static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0,
+                           0, 0) &&
         WinHttpReceiveResponse(request, nullptr)) {
         DWORD code = 0, size = sizeof(code);
         WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -365,11 +382,22 @@ HttpResponse public_get(const std::string &url) {
             dup2(nullfd, STDERR_FILENO);
         close(pipes[0]);
         close(pipes[1]);
-        execlp("curl", "curl", "--silent", "--show-error", "--connect-timeout", "4", "--max-time", "8",
-               "--max-filesize", "16777216", "--proto", "=https", "--user-agent",
-               "Edgecourt/0.1 personal NBA research", "-H", "Accept: application/json, text/html;q=0.9", "-H",
-               "Referer: https://www.nba.com/", "--write-out", "\nEDGECOURT_STATUS:%{http_code}", url.c_str(),
-               static_cast<char *>(nullptr));
+        std::vector<std::string> args = {"curl",        "--silent", "--show-error", "--connect-timeout",
+                                         "4",           "--max-time", "8",          "--max-filesize",
+                                         "16777216",    "--proto",    "=https",     "--user-agent",
+                                         "Edgecourt/0.1 personal NBA research"};
+        for (const auto &header : request_headers) {
+            args.push_back("-H");
+            args.push_back(header.first + ": " + header.second);
+        }
+        args.push_back("--write-out");
+        args.push_back("\nEDGECOURT_STATUS:%{http_code}");
+        args.push_back(url);
+        std::vector<char *> argv;
+        for (auto &arg : args)
+            argv.push_back(arg.data());
+        argv.push_back(nullptr);
+        execvp("curl", argv.data());
         _exit(127);
     }
     close(pipes[1]);
@@ -2108,9 +2136,10 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
             const auto league_id =
                 std::to_string(static_cast<long long>(number(league.value("id", json()), -1)));
             auto matchups = get(
-                "https://guest.api.arcadia.pinnacle.com/0.1/leagues/" + league_id + "/matchups", 120, 600);
+                "https://guest.api.arcadia.pinnacle.com/0.1/leagues/" + league_id + "/matchups?brandId=0",
+                120, 600);
             auto straight = get("https://guest.api.arcadia.pinnacle.com/0.1/leagues/" + league_id +
-                                    "/markets/straight/period/0",
+                                    "/markets/straight/period/0?brandId=0",
                                 45, 0);
             pinnacle_state = straight;
             if (!matchups.data.is_null() && !straight.data.is_null()) {
@@ -2121,8 +2150,9 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
         }
     }
     s["sources"].push_back(source("pinnacle", "Pinnacle NBA moneylines", pinnacle_state, pinnacle_count,
-                                  "Anonymous guest feed used by Pinnacle's public site; American prices "
-                                  "converted to percentages. Undocumented and can change or block."));
+                                  "Anonymous guest feed used by Pinnacle's public site (requests carry "
+                                  "the site's published guest key; keyless calls now return 404). American "
+                                  "prices converted to percentages. Undocumented and can change or block."));
     auto season = nba_season(now_seconds());
     auto date_from = iso_at(now_seconds() - 210 * 86400).substr(0, 10);
     const auto player_url = [&](const std::string &year) {
@@ -2175,63 +2205,11 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
             active.insert(game.value("home", ""));
             active.insert(game.value("away", ""));
         }
-    // Live summaries outrank roster enrichment: fresh box scores gate in-play
-    // eligibility, while rosters are hourly-cached context.
-    int summaries = 0;
-    if (!s["games"].empty())
-        for (const auto &game : s["games"]) {
-            if (game.value("status", "") != "live" || !game.contains("espnId") || summaries >= 6)
-                continue;
-            auto summary = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=" +
-                                   game.value("espnId", ""),
-                               30, 0);
-            if (!summary.data.is_null()) {
-                parse_espn_summary(summary.data, s, game, summary.fetched_at);
-                ++summaries;
-            }
-        }
-    s["sources"].push_back({{"id", "boxscores"},
-                            {"label", "ESPN live player box scores"},
-                            {"state", summaries ? "ok" : "idle"},
-                            {"updatedAt", summaries ? now_iso() : ""},
-                            {"count", summaries},
-                            {"message", "Fresh accrued stats are mandatory for in-play props. No live player "
-                                        "value is extrapolated from a pregame-only feed."}});
-    int roster_count = 0, roster_failures = 0;
-    if (!s["games"].empty())
-        for (const auto &team : active) {
-            if (!s["teams"].contains(team) || !s["teams"][team].contains("espnId"))
-                continue;
-            auto roster = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/" +
-                                  s["teams"][team].value("espnId", "") + "/roster",
-                              3600, 7200);
-            if (!roster.data.is_null()) {
-                parse_espn_roster(roster.data, s, team, roster.fetched_at);
-                ++roster_count;
-            } else
-                ++roster_failures;
-        }
-    s["sources"].push_back(
-        {{"id", "rosters"},
-         {"label", "ESPN roster + injury context"},
-         {"state", roster_count ? "ok" : "unavailable"},
-         {"updatedAt", roster_count ? now_iso() : ""},
-         {"count", roster_count},
-         {"message", "Fetched " + std::to_string(roster_count) + " active team rosters; " +
-                         std::to_string(roster_failures) +
-                         " failed. Injury feeds may lag and are not a confirmed starting lineup."}});
-    s["sources"].push_back(
-        {{"id", "prop-odds"},
-         {"label", "Player-prop & team-total odds"},
-         {"state", "import_required"},
-         {"updatedAt", ""},
-         {"count", 0},
-         {"message", "There is no bundled reliable free/keyless all-books prop feed. Import current CSV/JSON "
-                     "quotes. First basket also requires explicit history and confirmed starters."}});
     // More keyless context from swar/nba_api endpoint definitions (standings,
     // player season lines, team Four Factors). Cached for 6 hours like the other
-    // stats feeds and fetched last: they enrich research panels and schedule
-    // cards as context, and never gate or alter a probability.
+    // stats feeds and fetched before the per-game/per-team fan-out below, so
+    // the request budget can only ever starve roster refresh — never these
+    // single-request feeds. They never gate or alter a probability.
     auto standings = get("https://stats.nba.com/stats/leaguestandingsv3?LeagueID=00&Season=" + season +
                              "&SeasonType=Regular%20Season&SeasonYear=",
                          21600, 172800);
@@ -2471,6 +2449,68 @@ json PublicFeeds::refresh(const json &previous, const std::atomic<bool> *cancell
                      "timestamped report URLs or bypass the restriction. Availability context comes from ESPN "
                      "roster listings and the NBA daily-lineup feed; absence of a listing is never treated as "
                      "proof a player is healthy."}});
+    // Fan-out runs last, after every single-request feed: live summaries gate
+    // in-play eligibility, rosters are hourly-cached context. Either can be
+    // cut short by the request budget without starving the feeds above.
+    int summaries = 0;
+    if (!s["games"].empty())
+        for (const auto &game : s["games"]) {
+            if (game.value("status", "") != "live" || !game.contains("espnId") || summaries >= 6)
+                continue;
+            auto summary = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=" +
+                                   game.value("espnId", ""),
+                               30, 0);
+            if (!summary.data.is_null()) {
+                parse_espn_summary(summary.data, s, game, summary.fetched_at);
+                ++summaries;
+            }
+        }
+    s["sources"].push_back({{"id", "boxscores"},
+                            {"label", "ESPN live player box scores"},
+                            {"state", summaries ? "ok" : "idle"},
+                            {"updatedAt", summaries ? now_iso() : ""},
+                            {"count", summaries},
+                            {"message", "Fresh accrued stats are mandatory for in-play props. No live player "
+                                        "value is extrapolated from a pregame-only feed."}});
+    int roster_count = 0, roster_failures = 0, roster_network = 0;
+    if (!s["games"].empty())
+        for (const auto &team : active) {
+            if (!s["teams"].contains(team) || !s["teams"][team].contains("espnId"))
+                continue;
+            // Fan-out cap: at most 10 roster *network* fetches per refresh
+            // (cache hits are free). Hourly-cached rosters fill in over the
+            // next 60-second auto-refreshes; single-request feeds above can
+            // never be starved by this fan-out again.
+            if (roster_network >= 10)
+                break;
+            auto roster = get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/" +
+                                  s["teams"][team].value("espnId", "") + "/roster",
+                              3600, 7200);
+            if (!roster.cached)
+                ++roster_network;
+            if (!roster.data.is_null()) {
+                parse_espn_roster(roster.data, s, team, roster.fetched_at);
+                ++roster_count;
+            } else
+                ++roster_failures;
+        }
+    s["sources"].push_back(
+        {{"id", "rosters"},
+         {"label", "ESPN roster + injury context"},
+         {"state", roster_count ? "ok" : "unavailable"},
+         {"updatedAt", roster_count ? now_iso() : ""},
+         {"count", roster_count},
+         {"message", "Fetched " + std::to_string(roster_count) + " active team rosters; " +
+                         std::to_string(roster_failures) +
+                         " failed. Injury feeds may lag and are not a confirmed starting lineup."}});
+    s["sources"].push_back(
+        {{"id", "prop-odds"},
+         {"label", "Player-prop & team-total odds"},
+         {"state", "import_required"},
+         {"updatedAt", ""},
+         {"count", 0},
+         {"message", "There is no bundled reliable free/keyless all-books prop feed. Import current CSV/JSON "
+                     "quotes. First basket also requires explicit history and confirmed starters."}});
     // Keep only players on active teams in the browser workspace. Cache retains full historical responses.
     for (auto it = s["players"].begin(); it != s["players"].end();) {
         auto team = it.value().value("team", "");

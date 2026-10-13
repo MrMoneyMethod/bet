@@ -1185,6 +1185,26 @@ int main() {
                 carried = true;
         check(carried, "Dashboard carries compact team league context");
     });
+    test("Pinnacle guest requests carry the published site key, others do not", [] {
+        auto has = [](const std::vector<std::pair<std::string, std::string>> &headers,
+                      const std::string &name, const std::string &value) {
+            for (const auto &h : headers)
+                if (h.first == name && h.second == value)
+                    return true;
+            return false;
+        };
+        const auto pinnacle = public_request_headers(
+            "https://guest.api.arcadia.pinnacle.com/0.1/leagues/487/matchups?brandId=0");
+        check(has(pinnacle, "X-API-Key", "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"),
+              "Pinnacle guest key header sent (keyless calls now return 404)");
+        check(has(pinnacle, "Referer", "https://www.pinnacle.com/"), "Pinnacle referer sent");
+        const auto stats = public_request_headers("https://stats.nba.com/stats/leaguestandingsv3?LeagueID=00");
+        check(!has(stats, "X-API-Key", "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"),
+              "Guest key is never sent to other hosts");
+        check(allowed_data_url(
+                  "https://guest.api.arcadia.pinnacle.com/0.1/leagues/487/matchups?brandId=0"),
+              "Pinnacle brandId URL stays allowlisted");
+    });
     test("New keyless price hosts are allowlisted and lookalikes are not", [] {
         check(allowed_data_url("https://gamma-api.polymarket.com/events?tag_slug=nba"), "Polymarket");
         check(allowed_data_url("https://external-api.kalshi.com/trade-api/v2/markets"), "Kalshi");
